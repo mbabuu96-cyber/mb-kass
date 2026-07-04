@@ -12,6 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="MB Касс">
 <link rel="apple-touch-icon" href="./icon-192.png">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
   :root{
@@ -31,6 +32,8 @@
   .brand h1{ font-size:19px; margin:0; font-weight:700; }
   .status{ font-size:12px; color:var(--ink-soft); font-family:var(--mono); }
   .status.ok::before{ content:"\25CF"; color:var(--accent); margin-right:5px; }
+  .status.partial::before{ content:"\25CF"; color:var(--gold); margin-right:5px; }
+  .status.unpaid::before{ content:"\25CF"; color:var(--warm); margin-right:5px; }
   .tabs{ display:flex; gap:4px; background:var(--panel); padding:4px; border-radius:12px; border:1px solid var(--line); margin-bottom:16px; flex-wrap:wrap; }
   .tab{ flex:1; min-width:96px; text-align:center; padding:9px 10px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px; color:var(--ink-soft); user-select:none; transition:all .15s; }
   .tab:hover{ background:var(--bg); }
@@ -49,6 +52,8 @@
   .btn-accent:hover{ background:var(--accent-dark); }
   .btn-warm{ background:var(--warm-soft); color:var(--warm); }
   .btn-blue{ background:var(--blue-soft); color:var(--blue); }
+  .btn-gold{ background:var(--gold-soft); color:var(--gold); }
+  .btn-gold:hover{ background:#F5E4B8; }
   .btn-ghost{ background:transparent; color:var(--ink-soft); border-color:var(--line); }
   .btn-ghost:hover{ background:var(--bg); }
   .btn-block{ width:100%; }
@@ -118,19 +123,80 @@ window.addEventListener('unhandledrejection', function(e){
 });
 </script>
 <script>
+/* ============ SUPABASE + OFFLINE-SYNC STORAGE (OneDrive-шиг зарчим) ============ */
+const SUPABASE_URL = 'https://etlbmfikjwwyptdlrlzj.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_U95zXhvyn5Sq3w4XXroTwA_JubvRcv3';
+let supabaseClient = null;
+try{
+  if(typeof supabase !== 'undefined'){ supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY); }
+}catch(e){ console.error('Supabase эхлүүлэхэд алдаа:', e); }
+
+const PENDING_QUEUE_KEY = '__pending_sync_queue__';
+function getPendingQueue(){
+  try{ const raw = localStorage.getItem(PENDING_QUEUE_KEY); return raw ? JSON.parse(raw) : []; }catch(e){ return []; }
+}
+function setPendingQueue(q){
+  try{ localStorage.setItem(PENDING_QUEUE_KEY, JSON.stringify(q)); }catch(e){}
+}
+function addToPendingQueue(key){
+  const q = getPendingQueue();
+  if(!q.includes(key)){ q.push(key); setPendingQueue(q); }
+}
+function removeFromPendingQueue(key){
+  setPendingQueue(getPendingQueue().filter(k=>k!==key));
+}
+
 async function loadKey(key, fallback){
-  try{
-    const raw = localStorage.getItem(key);
-    return raw!=null ? JSON.parse(raw) : fallback;
-  }catch(e){ console.error('Уншихад алдаа:', key, e); return fallback; }
+  // 1) Эхлээд орон нутгийн кэш-ээс шууд ачаална (хурдан, offline-д ажиллана)
+  let localValue = fallback;
+  try{ const raw = localStorage.getItem(key); if(raw!=null) localValue = JSON.parse(raw); }catch(e){}
+  // 2) Сүлжээтэй бол Supabase-аас хамгийн сүүлийн дата авахыг оролдоно
+  if(supabaseClient && navigator.onLine){
+    try{
+      const { data, error } = await supabaseClient.from('kv_store').select('value').eq('key', key).maybeSingle();
+      if(!error && data && data.value!=null){
+        localStorage.setItem(key, JSON.stringify(data.value));
+        return data.value;
+      }
+    }catch(e){ console.error('Cloud-оос унших алдаа (offline эсвэл сүлжээний асуудал):', e); }
+  }
+  return localValue;
 }
 async function saveKey(key, value){
-  try{
-    localStorage.setItem(key, JSON.stringify(value));
-  }catch(e){
-    console.error('Хадгалахад алдаа:', key, e);
-    flash('Хадгалахад алдаа гарлаа (санах ой дүүрсэн байж болзошгүй)', 'warm');
+  // 1) Орон нутагт шууд хадгална (offline-д ч алдагдахгүй)
+  try{ localStorage.setItem(key, JSON.stringify(value)); }catch(e){ console.error('Орон нутагт хадгалахад алдаа:', e); }
+  // 2) Сүлжээтэй бол шууд Supabase рүү илгээнэ; сүлжээгүй бол дараалалд нэмээд, сүлжээ ирэхэд автоматаар илгээнэ
+  if(supabaseClient && navigator.onLine){
+    try{
+      const { error } = await supabaseClient.from('kv_store').upsert({ key, value, updated_at: new Date().toISOString() });
+      if(error){ addToPendingQueue(key); } else { removeFromPendingQueue(key); }
+    }catch(e){ addToPendingQueue(key); }
+  } else {
+    addToPendingQueue(key); // offline - дараа нь синк хийх дараалалд нэмнэ
   }
+}
+async function flushPendingQueue(){
+  if(!supabaseClient || !navigator.onLine) return;
+  const q = getPendingQueue();
+  if(q.length===0) return;
+  flash('Сүлжээ сэргэлээ, дата синк хийж байна...', 'accent');
+  for(const key of q){
+    try{
+      const raw = localStorage.getItem(key);
+      if(raw==null){ removeFromPendingQueue(key); continue; }
+      const value = JSON.parse(raw);
+      const { error } = await supabaseClient.from('kv_store').upsert({ key, value, updated_at: new Date().toISOString() });
+      if(!error){ removeFromPendingQueue(key); }
+    }catch(e){ /* дараагийн 'online' үед дахин оролдоно */ }
+  }
+  if(getPendingQueue().length===0){ flash('Бүх дата синк хийгдлээ ✓', 'accent'); }
+}
+window.addEventListener('online', ()=>{ flushPendingQueue(); });
+window.addEventListener('load', ()=>{ if(navigator.onLine){ flushPendingQueue(); } });
+function getUniqueCategories(){
+  const set = new Set();
+  state.products.forEach(p=>{ if(p.category && p.category.trim()) set.add(p.category.trim()); });
+  return Array.from(set).sort();
 }
 function isLowStock(p){ return (p.stock||0) <= (p.minStock!=null ? p.minStock : 5); }
 const BACKUP_KEYS = ['pos:products','pos:suppliers','pos:customers','pos:sales','pos:purchases','pos:returns','pos:spoilage'];
@@ -198,7 +264,11 @@ let state = {
   tab: 'kass', loaded:false, modal:null, search:'', reportRange:'today',
   products: [], suppliers: [], customers: [], sales: [], purchases: [], returns: [], spoilage: [],
   cart: [], cartCustomerId:'', cartPayType:'cash', cartEbarimt:'',
-  purchaseCart: [], purchaseSupplierId:'', purchasePayType:'credit'
+  purchaseCart: [], purchaseSupplierId:'', purchasePayType:'credit',
+  purchaseEntryOpen:false, historyFilterOpen:false,
+  purchaseFilters:{ startDate:'', endDate:'', supplierId:'', productQuery:'', category:'', payType:'' },
+  purchaseCategoryFilter:'',
+  editPurchaseId:null, editPurchaseCart:[], editPurchaseSupplierId:'', editPurchasePayType:'credit'
 };
 
 async function initData(){
@@ -263,6 +333,12 @@ async function checkout(){
   if(state.cartPayType==='credit' && !state.cartCustomerId){
     flash('Зээлээр борлуулахын тулд харилцагч сонгоно уу', 'warm'); return;
   }
+  // Тооцоо хийхийн өмнө үлдэгдлийг дахин шалгана - сагсанд нэмснээс хойш өөр газар (жишээ нь Хоргодол) үлдэгдэл өөрчлөгдсөн байж болзошгүй
+  for(const c of state.cart){
+    const p = state.products.find(x=>x.id===c.productId);
+    if(!p){ flash('Бараа олдсонгүй: ' + c.name + '. Сагснаас хасна уу', 'warm'); return; }
+    if(c.qty > p.stock){ flash('Үлдэгдэл хүрэлцэхгүй: ' + p.name + ' (одоо үлдэгдэл ' + p.stock + ')', 'warm'); return; }
+  }
   const total = cartTotal();
   const sale = {
     id: uid(), timestamp: Date.now(), items: state.cart.map(c=>({...c})), total,
@@ -293,12 +369,26 @@ async function saveProduct(form){
   d.name = form.name.value.trim(); d.barcode = form.barcode.value.trim(); d.category = form.category.value.trim();
   d.buyPrice = parseFloat(form.buyPrice.value)||0;
   d.manualSellPrice = (form.manualSellPrice.value.trim()!=='') ? (parseFloat(form.manualSellPrice.value)||0) : null;
-  d.stock = parseFloat(form.stock.value)||0; d.minStock = parseFloat(form.minStock.value)||5; d.supplierId = form.supplierId.value || '';
+  // d.stock-ыг эндээс шинэчлэхгүй - зөвхөн Орлого/Борлуулалт/Буцаалт/Хорогдлын гүйлгээгээр л өөрчлөгдөнө
+  d.minStock = Math.max(0, parseFloat(form.minStock.value)||5);
+  d.supplierId = (form.supplierId && form.supplierId.value) ? form.supplierId.value : (d.supplierId||'');
   if(!d.name){ flash('Барааны нэрийг оруулна уу', 'warm'); return; }
-  if(!d.id){ d.id = uid(); state.products.push(d); } else { const idx = state.products.findIndex(p=>p.id===d.id); state.products[idx] = d; }
+  if(!d.id){
+    // Шинэ бараа үүсгэх үед л ижил нэртэй бараа байгаа эсэхийг шалгана (дахин худалдан авахад хамаарахгүй, учир нь тэр үед жагсаалтаас сонгодог)
+    const normalizedNew = d.name.toLowerCase().replace(/\s+/g,' ').trim();
+    const dup = state.products.find(p=> p.name.toLowerCase().replace(/\s+/g,' ').trim() === normalizedNew);
+    if(dup){
+      flash('"'+dup.name+'" нэртэй бараа аль хэдийн бүртгэлтэй байна (үлдэгдэл: '+dup.stock+'). Дахин авахдаа жагсаалтаас сонгоно уу', 'warm');
+      return;
+    }
+    d.id = uid(); state.products.push(d);
+  } else {
+    const idx = state.products.findIndex(p=>p.id===d.id); state.products[idx] = d;
+  }
   await saveKey('pos:products', state.products);
   const shouldAddToPurchase = state.modal.addToPurchaseAfterSave;
-  state.modal = null; flash('Хадгаллаа', 'accent');
+  state.modal = shouldAddToPurchase ? { type:'purchaseEntry' } : null;
+  flash('Хадгаллаа', 'accent');
   if(shouldAddToPurchase){ addToPurchaseCart(d.id); }
   render();
 }
@@ -314,10 +404,18 @@ function openSupplierModal(sup){
 }
 async function saveSupplier(form){
   const d = state.modal.data;
+  const returnTo = state.modal.returnTo;
   d.name = form.name.value.trim(); d.phone = form.phone.value.trim(); d.debt = parseFloat(form.debt.value)||0;
   if(!d.name){ flash('Нэрийг оруулна уу', 'warm'); return; }
   if(!d.id){ d.id = uid(); state.suppliers.push(d); } else { const idx = state.suppliers.findIndex(s=>s.id===d.id); state.suppliers[idx] = d; }
-  await saveKey('pos:suppliers', state.suppliers); state.modal = null; render();
+  await saveKey('pos:suppliers', state.suppliers);
+  if(returnTo==='purchaseEntry'){
+    state.purchaseSupplierId = d.id; // шинээр нэмсэн нийлүүлэгчийг автоматаар сонгоно
+    state.modal = { type:'purchaseEntry' };
+  } else {
+    state.modal = null;
+  }
+  render();
 }
 async function deleteSupplier(id){
   if(!confirm('Энэ нийлүүлэгчийг устгах уу?')) return;
@@ -383,10 +481,66 @@ async function submitPurchase(){
   }
   state.purchases.push(purchase);
   state.purchaseCart = []; state.purchaseSupplierId='';
+  state.modal = null; // амжилттай бүртгэсний дараа цонхыг хаана
   await saveKey('pos:products', state.products);
   await saveKey('pos:suppliers', state.suppliers);
   await saveKey('pos:purchases', state.purchases);
   flash('Худалдан авалт бүртгэгдлээ, үлдэгдэл нэмэгдлээ', 'accent');
+  render();
+}
+function openEditPurchaseModal(purchaseId){
+  const pu = state.purchases.find(x=>x.id===purchaseId);
+  if(!pu){ flash('Орлого олдсонгүй', 'warm'); return; }
+  const daysSince = (Date.now() - pu.timestamp) / (1000*60*60*24);
+  if(daysSince > 45){ flash('Энэ орлогыг засах хугацаа (45 хоног) дууссан байна', 'warm'); return; }
+  state.editPurchaseId = purchaseId;
+  state.editPurchaseCart = pu.items.map(c=>({...c}));
+  state.editPurchaseSupplierId = pu.supplierId;
+  state.editPurchasePayType = pu.payType || 'credit';
+  state.modal = { type:'editPurchase' };
+  render();
+}
+async function submitPurchaseEdit(){
+  const pu = state.purchases.find(x=>x.id===state.editPurchaseId);
+  if(!pu){ flash('Орлого олдсонгүй', 'warm'); return; }
+  if(state.editPurchaseCart.length===0){ flash('Бараа сонгоно уу', 'warm'); return; }
+  if(!state.editPurchaseSupplierId){ flash('Нийлүүлэгч сонгоно уу', 'warm'); return; }
+
+  // 1-р алхам: ХУУЧИН гүйлгээний нөлөөг бүрэн буцаана (үлдэгдэл, өглөг)
+  const oldSupplier = state.suppliers.find(s=>s.id===pu.supplierId);
+  pu.items.forEach(oldItem=>{
+    const p = state.products.find(x=>x.id===oldItem.productId);
+    if(p) p.stock = Math.max(0, (p.stock||0) - oldItem.qty);
+  });
+  if(oldSupplier && (pu.payType||'credit')==='credit'){
+    oldSupplier.debt = Math.max(0, (oldSupplier.debt||0) - pu.total);
+  }
+
+  // 2-р алхам: ШИНЭ (засварласан) гүйлгээний нөлөөг тооцож нэмнэ
+  const newTotal = state.editPurchaseCart.reduce((s,c)=>s+c.price*c.qty,0);
+  const newSupplier = state.suppliers.find(s=>s.id===state.editPurchaseSupplierId);
+  state.editPurchaseCart.forEach(c=>{
+    const p = state.products.find(x=>x.id===c.productId);
+    if(p){ p.stock = (p.stock||0) + c.qty; }
+  });
+  if(newSupplier && state.editPurchasePayType==='credit'){
+    if((newSupplier.debt||0)===0){ newSupplier.paidTotal = 0; }
+    newSupplier.debt = (newSupplier.debt||0) + newTotal;
+  }
+
+  // 3-р алхам: гүйлгээний бичлэгийг шинэчилнэ (огноог хэвээр үлдээж, зассан тэмдэглэгээ нэмнэ)
+  pu.items = state.editPurchaseCart.map(c=>({...c}));
+  pu.total = newTotal;
+  pu.supplierId = state.editPurchaseSupplierId;
+  pu.payType = state.editPurchasePayType;
+  pu.editedAt = Date.now();
+
+  state.editPurchaseId = null; state.editPurchaseCart = []; state.editPurchaseSupplierId=''; state.editPurchasePayType='credit';
+  state.modal = null;
+  await saveKey('pos:products', state.products);
+  await saveKey('pos:suppliers', state.suppliers);
+  await saveKey('pos:purchases', state.purchases);
+  flash('Орлого засварлагдлаа, үлдэгдэл/өглөг зөв тоогоор шинэчлэгдлээ', 'accent');
   render();
 }
 
@@ -545,9 +699,13 @@ function render(){
   attachHandlers();
 }
 function topbar(){
+  const pending = getPendingQueue().length;
+  const online = navigator.onLine;
+  const statusText = !online ? 'Offline - орон нутагт хадгалж байна' : (pending>0 ? 'Синк хийгдэж байна ('+pending+')' : 'Cloud-тэй синк хийгдсэн');
+  const statusClass = !online ? 'unpaid' : (pending>0 ? 'partial' : 'ok');
   return '<div class="topbar"><div class="brand"><span class="mark">MB QR</span><h1>Дэлгүүрийн Касс</h1></div>' +
     '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
-    '<div class="status ok">Мэдээлэл энэ төхөөрөмж дээр хадгалагдана</div>' +
+    '<div class="status '+statusClass+'">'+statusText+'</div>' +
     '<button class="btn btn-ghost btn-sm" id="exportBackupBtn" title="Бүх дата JSON файл болгож татах">Нөөцлөх</button>' +
     '<button class="btn btn-ghost btn-sm" id="importBackupBtn" title="Нөөцлөсөн JSON файлаас сэргээх">Сэргээх</button>' +
     '<input type="file" id="importBackupFile" accept=".json" style="display:none;" />' +
@@ -593,18 +751,54 @@ function baraaView(){
     const q = state.search.toLowerCase();
     return p.name.toLowerCase().includes(q) || (p.barcode||'').toLowerCase().includes(q);
   });
-  return '<div class="panel"><div class="toolbar"><input style="max-width:280px;" placeholder="Хайх..." id="baraaSearch" value="'+esc(state.search)+'" /><button class="btn btn-accent" id="addProductBtn">+ Шинэ бараа</button></div>' +
+  return '<div class="panel"><div class="toolbar"><input style="max-width:280px;" placeholder="Хайх..." id="baraaSearch" value="'+esc(state.search)+'" />' +
+    '<div class="info-note" style="margin:0;flex:1;min-width:200px;">Шинэ бараа "Орлого" таб дээрээс бүртгэнэ (давхардал үүсэхээс сэргийлж энд шинээр нэмэх боломжгүй).</div></div>' +
+    '<div style="position:relative;">' +
+    '<div id="baraaTableScroll" style="max-height:480px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;">' +
     '<table><thead><tr><th>Нэр</th><th>Баркод</th><th>Ангилал</th><th style="text-align:right">Авсан үнэ</th><th style="text-align:right">Автомат Зарах үнэ</th><th style="text-align:right">Эцсийн Зарах үнэ</th><th style="text-align:right">Ашиг</th><th style="text-align:right">Үлдэгдэл</th><th></th></tr></thead><tbody>' +
     (filtered.map(p=>'<tr><td>'+esc(p.name)+'</td><td class="muted">'+esc(p.barcode||'-')+'</td><td>'+esc(p.category||'-')+'</td><td class="num">'+mnt(p.buyPrice)+'</td><td class="num muted">'+mnt(getAutoSellPrice(p))+'</td><td class="num">'+mnt(getSellPrice(p))+(p.manualSellPrice!=null&&p.manualSellPrice>0?' <span class="badge partial" title="Гараар тохируулсан">гар</span>':'')+'</td><td class="num">'+mnt(getSellPrice(p)-(p.buyPrice||0))+'</td><td class="num"><span class="badge '+(isLowStock(p)?'low':'ok')+'" title="Доод хэмжээ: '+(p.minStock!=null?p.minStock:5)+'">'+p.stock+'</span></td><td style="text-align:right; white-space:nowrap;"><button class="icon-btn" data-editproduct="'+p.id+'">edit</button><button class="icon-btn" data-delproduct="'+p.id+'">del</button></td></tr>').join('') || '<tr><td colspan="9" class="muted" style="padding:20px 0;">Бараа алга байна</td></tr>') +
-    '</tbody></table></div>';
+    '</tbody></table></div>' +
+    (filtered.length>4 ? '<div style="display:flex;flex-direction:column;gap:6px;position:absolute;right:-4px;top:50%;transform:translate(100%,-50%);">' +
+      '<button class="btn btn-ghost btn-sm" id="baraaScrollUpBtn" title="Дээшээ гүйлгэх">\u25B2</button>' +
+      '<button class="btn btn-ghost btn-sm" id="baraaScrollDownBtn" title="Доошоо гүйлгэх">\u25BC</button>' +
+      '</div>' : '') +
+    '</div></div>';
 }
 
 function huduldanView(){
+  const filters = state.purchaseFilters;
+  const hasFilters = filters.startDate || filters.endDate || filters.supplierId || filters.productQuery || filters.category || filters.payType;
+  const rows = purchaseHistoryRows();
+  const now = new Date();
+  const monthLabel = now.toLocaleDateString('mn-MN', {year:'numeric', month:'long'});
+  return '<div class="panel"><div class="toolbar">' +
+    '<h2 style="margin:0;">Орлогын түүх' + (hasFilters ? ' <span class="badge blue">шүүлттэй</span>' : ' <span class="muted" style="font-weight:400;">('+monthLabel+')</span>') + '</h2>' +
+    '<div style="display:flex;gap:8px;">' +
+      '<button class="btn btn-ghost" id="openHistoryFilterBtn">Хайх / Шүүх</button>' +
+      '<button class="btn btn-accent" id="openPurchaseEntryBtn">+ Нийлүүлэгчээс бараа авах</button>' +
+    '</div></div>' +
+    (hasFilters ? '<button class="btn btn-ghost btn-sm" id="clearHistoryFilterBtn" style="margin-bottom:10px;">Шүүлтүүр цэвэрлэх</button>' : '') +
+    '<table><thead><tr><th>Огноо</th><th>Баркод</th><th>Барааны нэр</th><th style="text-align:right">Тоо</th><th style="text-align:right">Авсан үнэ</th><th>Төлбөрийн төрөл</th><th>Нийлүүлэгч</th><th style="text-align:right">Нийт дүн</th><th></th></tr></thead><tbody>' +
+    (rows.length ? rows.map(r=>{
+      const daysSince = (Date.now() - r.timestamp) / (1000*60*60*24);
+      const canEdit = daysSince <= 45;
+      return '<tr><td class="muted">'+fmtDate(r.timestamp)+'</td><td class="muted">'+esc(r.barcode||'-')+'</td><td>'+esc(r.name)+'</td><td class="num">'+r.qty+'</td><td class="num">'+mnt(r.price)+'</td><td>'+payTypeBadge(r.payType)+'</td><td class="muted">'+esc(r.supplierName)+'</td><td class="num">'+mnt(r.qty*r.price)+'</td><td style="text-align:right;">'+(canEdit?'<button class="btn btn-gold btn-sm" data-editpurchase="'+r.purchaseId+'">Засах</button>':'')+'</td></tr>';
+    }).join('') : '<tr><td colspan="9" class="muted" style="padding:14px 0;">Энэ хугацаанд орлого алга байна</td></tr>') + '</tbody></table>' +
+    '<div class="info-note" style="margin-top:14px;">\u{1F4A1} <b>Баркодгүй бараа (жимс, ногоо гэх мэт) хэрхэн бүртгэх вэ?</b><br>Баркод скан хийхийн оронд, шинэ бараа бүртгэх цонхон дээр <b>"Баркод / QR"</b> талбарыг хоосон орхиод шууд хадгална. Дараа нь борлуулах, орлого авахдаа баркодоор биш, <b>нэрээр хайж</b> олоод ашиглана.</div>' +
+    '</div>';
+}
+function purchaseEntryModal(){
   const supOpts = state.suppliers.map(s=>'<option value="'+s.id+'" '+(state.purchaseSupplierId===s.id?'selected':'')+'>'+esc(s.name)+'</option>').join('');
-  const prodOpts = state.products.map(p=>'<option value="'+p.id+'">'+esc(p.name)+'</option>').join('');
-  return '<div class="grid2"><div class="panel"><h2>Нийлүүлэгчээс бараа авах</h2>' +
+  const catFilter = state.purchaseCategoryFilter||'';
+  const filteredProducts = catFilter ? state.products.filter(p=>p.category===catFilter) : state.products;
+  const uniqueNames = Array.from(new Set(filteredProducts.map(p=>p.name)));
+  const prodOpts = uniqueNames.map(n=>'<option value="'+esc(n)+'"></option>').join('');
+  const categoryFilterOpts = getUniqueCategories().map(c=>'<option value="'+esc(c)+'" '+(catFilter===c?'selected':'')+'>'+esc(c)+'</option>').join('');
+  const supplierField = '<div class="scan-row" style="margin-bottom:10px;"><select id="purchaseSupplierSel" style="flex:1;"><option value="">- Сонгох -</option>'+supOpts+'</select><button type="button" class="btn btn-blue" id="newSupplierBtn">+ Шинэ</button></div>';
+  const categoryField = '<div class="scan-row" style="margin-bottom:8px;"><select id="purchaseCategoryFilterSel" style="flex:1;"><option value="">- Бүх ангилал -</option>'+categoryFilterOpts+'</select><button type="button" class="btn btn-blue" id="newCategoryBtn">+ Шинэ</button></div>';
+  return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:640px;"><h3>Нийлүүлэгчээс бараа авах</h3>' +
     '<div class="info-note">Энд бараа нэмэхэд агуулахын үлдэгдэл автоматаар нэмэгдэнэ. Хэрэв "Зээл" сонговол өглөг нэмэгдэнэ, бусад төлбөрийн төрөлд (Бэлэн/Qpay/POS) өглөг үүсэхгүй - шууд төлсөн гэж тооцно.</div>' +
-    '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Нийлүүлэгч</label><select id="purchaseSupplierSel" style="margin-bottom:10px;"><option value="">- Сонгох -</option>'+supOpts+'</select>' +
+    '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Нийлүүлэгч</label>' + supplierField +
     '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Төлбөрийн төрөл</label>' +
     '<div class="paytype" style="margin-bottom:10px;">' +
       '<div class="opt '+(state.purchasePayType==='cash'?'sel':'')+'" data-purchasepaytype="cash">Бэлэн</div>' +
@@ -614,32 +808,76 @@ function huduldanView(){
     '</div>' +
     '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Баркод скан хийх</label>' +
     '<div class="scan-row" style="margin-bottom:8px;"><input id="purchaseScanInput" placeholder="Баркод скан хийх..." autocomplete="off" /><button class="btn btn-accent" id="purchaseScanGoBtn">Нэмэх</button><button class="btn btn-blue" id="purchaseCameraScanBtn" title="Камераар скан хийх">Камер</button></div>' +
-    '<div class="muted" style="margin-bottom:8px;">Хэрэв баркод бүртгэлгүй бол шинэ бараа бүртгэх цонх автоматаар нээгдэнэ.</div>' +
-    '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Эсвэл нэрээр хайж нэмэх</label><select id="purchaseProductSel"><option value="">- Бараа сонгох -</option>'+prodOpts+'</select></div>' +
-    '<div class="panel"><h2>Худалдан авалтын сагс</h2>' +
+    '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Ангилал</label>' +
+    categoryField +
+    '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Барааны нэр</label>' +
+    '<div class="scan-row" style="margin-bottom:4px;"><input id="purchaseProductNameInput" list="purchaseProductNameList" placeholder="Бараа хайх эсвэл шинээр бичих..." autocomplete="off" /><button type="button" class="btn btn-accent" id="purchaseProductNameGoBtn">Нэмэх</button></div>' +
+    '<datalist id="purchaseProductNameList">'+prodOpts+'</datalist>' +
+    '<div class="muted" style="font-size:11px;margin-bottom:12px;">Байгаа барааны нэрийг бичвэл жагсаалтаас санал болгоно (ижил нэртэй бол баркодоор ялгаж болно). Шинэ нэр бичвэл шинэ бараа бүртгэх цонх нээгдэнэ.</div>' +
+    '<h2 style="margin-top:14px;">Худалдан авалтын сагс</h2>' +
     '<div class="cart-items-box">' +
-    (state.purchaseCart.length ? state.purchaseCart.map(c=>
-      '<div class="trow" style="font-family:var(--sans);flex-wrap:wrap;gap:4px;"><span class="tname" style="min-width:90px;">'+esc(c.name)+'</span>' +
+    (state.purchaseCart.length ? state.purchaseCart.map(c=>{
+      const p = state.products.find(x=>x.id===c.productId);
+      const prevPrice = p ? (p.buyPrice||0) : 0;
+      const priceDiff = prevPrice>0 ? Math.abs(c.price - prevPrice)/prevPrice : 0;
+      const priceWarn = priceDiff > 0.15 ? '<span style="color:var(--gold);font-size:11px;font-weight:600;white-space:nowrap;">\u26A0 \u04E9\u043C\u043D\u04E9\u0445: '+mnt(prevPrice)+'</span>' : '';
+      return '<div class="trow" style="font-family:var(--sans);flex-wrap:wrap;gap:4px;"><span class="tname" style="min-width:90px;">'+esc(c.name)+'</span>' +
       '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Тоо</span><input type="number" min="1" value="'+c.qty+'" data-purqty="'+c.productId+'" style="width:52px;padding:4px;" /></span>' +
       '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Авсан үнэ</span><input type="number" min="0" value="'+c.price+'" data-purprice="'+c.productId+'" style="width:80px;padding:4px;" /></span>' +
-      '<span class="rm" data-rmpurcart="'+c.productId+'" style="margin-left:2px;">x</span></div>'
-    ).join('') : '<div class="muted" style="padding:14px 0;">Бараа алга</div>') + '</div>' +
+      priceWarn +
+      '<span class="rm" data-rmpurcart="'+c.productId+'" style="margin-left:2px;">x</span></div>';
+    }).join('') : '<div class="muted" style="padding:14px 0;">Бараа алга</div>') + '</div>' +
     '<div class="ttotal"><span>Нийт төлөх</span><span>'+mnt(purchaseCartTotal())+'</span></div>' +
-    '<button class="btn btn-accent btn-block" style="margin-top:10px;" id="submitPurchaseBtn" '+(state.purchaseCart.length?'':'disabled')+'>Бүртгэх</button></div></div>' +
-    '<div class="panel" style="margin-top:16px;"><h2>Орлогын түүх</h2>' +
-    '<table><thead><tr><th>Огноо</th><th>Баркод</th><th>Барааны нэр</th><th style="text-align:right">Тоо</th><th style="text-align:right">Авсан үнэ</th><th>Төлбөрийн төрөл</th><th>Нийлүүлэгч</th><th style="text-align:right">Нийт дүн</th></tr></thead><tbody>' +
-    (purchaseHistoryRows().length ? purchaseHistoryRows().map(r=>
-      '<tr><td class="muted">'+fmtDate(r.timestamp)+'</td><td class="muted">'+esc(r.barcode||'-')+'</td><td>'+esc(r.name)+'</td><td class="num">'+r.qty+'</td><td class="num">'+mnt(r.price)+'</td><td>'+payTypeBadge(r.payType)+'</td><td class="muted">'+esc(r.supplierName)+'</td><td class="num">'+mnt(r.qty*r.price)+'</td></tr>'
-    ).join('') : '<tr><td colspan="8" class="muted" style="padding:14px 0;">Түүх алга байна</td></tr>') + '</tbody></table></div>';
+    '<div class="modal-actions"><button class="btn btn-accent" id="submitPurchaseBtn" '+(state.purchaseCart.length?'':'disabled')+'>Бүртгэх</button><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div>' +
+    '</div></div>';
+}
+function historyFilterModal(){
+  const f = state.purchaseFilters;
+  const supOpts = state.suppliers.map(s=>'<option value="'+s.id+'" '+(f.supplierId===s.id?'selected':'')+'>'+esc(s.name)+'</option>').join('');
+  const catOpts = getUniqueCategories().map(c=>'<option value="'+esc(c)+'" '+(f.category===c?'selected':'')+'>'+esc(c)+'</option>').join('');
+  return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>Орлогын түүх хайх / шүүх</h3>' +
+    '<div class="form-grid">' +
+    '<div><label>Эхлэх огноо</label><input type="date" id="filterStartDate" value="'+esc(f.startDate)+'" /></div>' +
+    '<div><label>Дуусах огноо</label><input type="date" id="filterEndDate" value="'+esc(f.endDate)+'" /></div>' +
+    '<div><label>Нийлүүлэгч</label><select id="filterSupplier"><option value="">- Бүгд -</option>'+supOpts+'</select></div>' +
+    '<div><label>Ангилал</label><select id="filterCategory"><option value="">- Бүгд -</option>'+catOpts+'</select></div>' +
+    '<div class="full"><label>Барааны нэрээр хайх</label><input type="text" id="filterProductQuery" value="'+esc(f.productQuery)+'" placeholder="Жишээ: сүү" /></div>' +
+    '<div class="full"><label>Төлбөрийн төрөл</label><select id="filterPayType"><option value="">- Бүгд -</option>' +
+      '<option value="cash" '+(f.payType==='cash'?'selected':'')+'>Бэлэн</option>' +
+      '<option value="credit" '+(f.payType==='credit'?'selected':'')+'>Зээл</option>' +
+      '<option value="qpay" '+(f.payType==='qpay'?'selected':'')+'>Qpay/Данс</option>' +
+      '<option value="pos" '+(f.payType==='pos'?'selected':'')+'>POS</option>' +
+    '</select></div>' +
+    '</div>' +
+    '<div class="modal-actions"><button class="btn btn-accent" id="applyHistoryFilterBtn">Хайх</button><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div>' +
+    '</div></div>';
 }
 function purchaseHistoryRows(){
   // орлогын sheet-ний яг форматад тохируулж, худалдан авалтуудыг мөр мөр болгож задална (нэг мөр = нэг барааны мөр)
+  const f = state.purchaseFilters;
+  const hasFilters = f.startDate || f.endDate || f.supplierId || f.productQuery || f.category || f.payType;
+  let startMs, endMs;
+  if(hasFilters && (f.startDate || f.endDate)){
+    startMs = f.startDate ? new Date(f.startDate+'T00:00:00').getTime() : 0;
+    endMs = f.endDate ? new Date(f.endDate+'T23:59:59').getTime() : Infinity;
+  } else if(!hasFilters){
+    const now = new Date();
+    startMs = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    endMs = Infinity;
+  } else {
+    startMs = 0; endMs = Infinity;
+  }
   const rows = [];
-  state.purchases.slice().reverse().slice(0,30).forEach(pu=>{
+  state.purchases.slice().reverse().forEach(pu=>{
+    if(pu.timestamp < startMs || pu.timestamp > endMs) return;
+    if(f.supplierId && pu.supplierId !== f.supplierId) return;
+    if(f.payType && (pu.payType||'credit') !== f.payType) return;
     const sup = state.suppliers.find(s=>s.id===pu.supplierId);
     pu.items.forEach(it=>{
       const p = state.products.find(x=>x.id===it.productId);
-      rows.push({ timestamp: pu.timestamp, barcode: p?p.barcode:'', name: it.name, qty: it.qty, price: it.price, payType: pu.payType||'credit', supplierName: sup?sup.name:'-' });
+      if(f.productQuery && !it.name.toLowerCase().includes(f.productQuery.toLowerCase())) return;
+      if(f.category && (!p || p.category!==f.category)) return;
+      rows.push({ purchaseId: pu.id, timestamp: pu.timestamp, barcode: p?p.barcode:'', name: it.name, qty: it.qty, price: it.price, payType: pu.payType||'credit', supplierName: sup?sup.name:'-' });
     });
   });
   return rows;
@@ -707,7 +945,43 @@ function modalView(){
   if(state.modal.type==='spoilage') return spoilageModal();
   if(state.modal.type==='payAmount') return payAmountModal();
   if(state.modal.type==='camera') return cameraModal();
+  if(state.modal.type==='purchaseEntry') return purchaseEntryModal();
+  if(state.modal.type==='historyFilter') return historyFilterModal();
+  if(state.modal.type==='editPurchase') return editPurchaseModal();
+  if(state.modal.type==='newCategory') return newCategoryModal();
   return '';
+}
+function newCategoryModal(){
+  return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:360px;"><h3>Шинэ ангилал нэмэх</h3>' +
+    '<form id="newCategoryForm"><div class="form-grid"><div class="full"><label>Ангиллын нэр</label><input name="categoryName" placeholder="Жишээ: Тамхи" required autofocus /></div></div>' +
+    '<div class="modal-actions"><button type="submit" class="btn btn-accent">Нэмэх</button><button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></form></div></div>';
+}
+function editPurchaseModal(){
+  const supOpts = state.suppliers.map(s=>'<option value="'+s.id+'" '+(state.editPurchaseSupplierId===s.id?'selected':'')+'>'+esc(s.name)+'</option>').join('');
+  const pu = state.purchases.find(x=>x.id===state.editPurchaseId);
+  const daysLeft = pu ? Math.max(0, Math.floor(45 - (Date.now()-pu.timestamp)/(1000*60*60*24))) : 0;
+  return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:640px;"><h3>Орлого засах</h3>' +
+    '<div class="info-note" style="background:var(--gold-soft);color:var(--gold);">\u26A0\uFE0F Энэ гүйлгээг засварлахад үлдэгдэл болон өглөг автоматаар зөв тоогоор дахин тооцогдоно. Засах хугацаа: '+daysLeft+' хоног үлдсэн.</div>' +
+    '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Нийлүүлэгч</label>' +
+    '<select id="editPurchaseSupplierSel" style="margin-bottom:10px;"><option value="">- Сонгох -</option>'+supOpts+'</select>' +
+    '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Төлбөрийн төрөл</label>' +
+    '<div class="paytype" style="margin-bottom:10px;">' +
+      '<div class="opt '+(state.editPurchasePayType==='cash'?'sel':'')+'" data-editpurchasepaytype="cash">Бэлэн</div>' +
+      '<div class="opt '+(state.editPurchasePayType==='credit'?'sel':'')+'" data-editpurchasepaytype="credit">Зээл</div>' +
+      '<div class="opt '+(state.editPurchasePayType==='qpay'?'sel':'')+'" data-editpurchasepaytype="qpay">Qpay/Данс</div>' +
+      '<div class="opt '+(state.editPurchasePayType==='pos'?'sel':'')+'" data-editpurchasepaytype="pos">POS</div>' +
+    '</div>' +
+    '<h2 style="margin-top:14px;">Бараанууд</h2>' +
+    '<div class="cart-items-box">' +
+    (state.editPurchaseCart.length ? state.editPurchaseCart.map(c=>
+      '<div class="trow" style="font-family:var(--sans);flex-wrap:wrap;gap:4px;"><span class="tname" style="min-width:90px;">'+esc(c.name)+'</span>' +
+      '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Тоо</span><input type="number" min="1" value="'+c.qty+'" data-editpurqty="'+c.productId+'" style="width:52px;padding:4px;" /></span>' +
+      '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Авсан үнэ</span><input type="number" min="0" value="'+c.price+'" data-editpurprice="'+c.productId+'" style="width:80px;padding:4px;" /></span>' +
+      '<span class="rm" data-rmeditpurcart="'+c.productId+'" style="margin-left:2px;">x</span></div>'
+    ).join('') : '<div class="muted" style="padding:14px 0;">Бараа алга</div>') + '</div>' +
+    '<div class="ttotal"><span>Нийт дүн</span><span>'+mnt(state.editPurchaseCart.reduce((s,c)=>s+c.price*c.qty,0))+'</span></div>' +
+    '<div class="modal-actions"><button class="btn btn-gold" id="submitPurchaseEditBtn">Хадгалах</button><button type="button" class="btn btn-ghost" id="modalCancel">Цуцлах</button></div>' +
+    '</div></div>';
 }
 function cameraModal(){
   return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:400px;"><h3>Камераар скан хийх</h3>' +
@@ -717,17 +991,22 @@ function cameraModal(){
 }
 function productModal(){
   const d = state.modal.data;
+  const categories = getUniqueCategories();
+  const categoryOptions = categories.map(c=>'<option value="'+esc(c)+'"></option>').join('');
   const supOpts = state.suppliers.map(s=>'<option value="'+s.id+'" '+(d.supplierId===s.id?'selected':'')+'>'+esc(s.name)+'</option>').join('');
+  const supplierField = state.suppliers.length
+    ? '<div><label>Нийлүүлэгч</label><select name="supplierId"><option value="">-</option>'+supOpts+'</select></div>'
+    : '<div><label>Нийлүүлэгч</label><div class="info-note" style="margin:0;">Нийлүүлэгч бүртгэгдээгүй байна. <span class="rm" style="color:var(--accent);text-decoration:underline;cursor:pointer;" id="quickAddSupplierLink">+ Шинэ нийлүүлэгч нэмэх</span></div></div>';
   return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>'+(d.id?'Бараа засах':'Шинэ бараа')+'</h3><form id="productForm"><div class="form-grid">' +
     '<div class="full"><label>Барааны нэр</label><input name="name" value="'+esc(d.name)+'" required /></div>' +
-    '<div><label>Баркод / QR</label><input name="barcode" value="'+esc(d.barcode)+'" /></div>' +
-    '<div><label>Ангилал</label><input name="category" value="'+esc(d.category)+'" /></div>' +
+    '<div><label>Баркод / QR (хоосон орхиж болно)</label><input name="barcode" value="'+esc(d.barcode)+'" /></div>' +
+    '<div><label>Ангилал</label><input name="category" list="categoryList" value="'+esc(d.category)+'" placeholder="Сонгох эсвэл шинээр бичих" /><datalist id="categoryList">'+categoryOptions+'</datalist></div>' +
     '<div><label>Авсан үнэ</label><input name="buyPrice" id="modalBuyPrice" type="number" step="1" value="'+d.buyPrice+'" /></div>' +
     '<div><label>Автомат Зарах үнэ (Авсан \u00d7 20%)</label><input type="number" value="'+getAutoSellPrice(d)+'" id="modalAutoSell" disabled style="background:var(--bg);color:var(--ink-soft);" /></div>' +
     '<div class="full"><label>Гараар зарах үнэ (хоосон бол автоматыг ашиглана)</label><input name="manualSellPrice" type="number" step="1" value="'+(d.manualSellPrice!=null?d.manualSellPrice:'')+'" placeholder="Жишээ: 1500" /></div>' +
-    '<div><label>Үлдэгдэл</label><input name="stock" type="number" step="1" value="'+d.stock+'" /></div>' +
+    '<div><label>Үлдэгдэл (зөвхөн Орлого/Борлуулалт/Буцаалт/Хорогдлоор өөрчлөгдөнө)</label><input type="number" value="'+d.stock+'" disabled style="background:var(--bg);color:var(--ink-soft);" /></div>' +
     '<div><label>Анхааруулах доод хэмжээ</label><input name="minStock" type="number" step="1" value="'+(d.minStock!=null?d.minStock:5)+'" /></div>' +
-    '<div><label>Нийлүүлэгч</label><select name="supplierId"><option value="">-</option>'+supOpts+'</select></div></div>' +
+    supplierField + '</div>' +
     '<div class="modal-actions"><button type="submit" class="btn btn-accent">Хадгалах</button><button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></form></div></div>';
 }
 function supplierModal(){
@@ -804,13 +1083,57 @@ function attachHandlers(){
   const baraaSearch = document.getElementById('baraaSearch');
   if(baraaSearch){ baraaSearch.oninput = ()=>{ state.search = baraaSearch.value; render();
       const el=document.getElementById('baraaSearch'); if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); } }; }
-  const addProductBtn = document.getElementById('addProductBtn');
-  if(addProductBtn) addProductBtn.onclick = ()=> openProductModal(null);
+  const baraaScrollUpBtn = document.getElementById('baraaScrollUpBtn');
+  const baraaScrollDownBtn = document.getElementById('baraaScrollDownBtn');
+  const baraaTableScroll = document.getElementById('baraaTableScroll');
+  if(baraaScrollUpBtn && baraaTableScroll) baraaScrollUpBtn.onclick = ()=> baraaTableScroll.scrollBy({top:-160, behavior:'smooth'});
+  if(baraaScrollDownBtn && baraaTableScroll) baraaScrollDownBtn.onclick = ()=> baraaTableScroll.scrollBy({top:160, behavior:'smooth'});
   document.querySelectorAll('[data-editproduct]').forEach(el=>{ el.onclick = ()=> openProductModal(state.products.find(p=>p.id===el.dataset.editproduct)); });
   document.querySelectorAll('[data-delproduct]').forEach(el=>{ el.onclick = ()=> deleteProduct(el.dataset.delproduct); });
 
+  const openPurchaseEntryBtn = document.getElementById('openPurchaseEntryBtn');
+  if(openPurchaseEntryBtn) openPurchaseEntryBtn.onclick = ()=>{ state.modal = { type:'purchaseEntry' }; render(); };
+  const openHistoryFilterBtn = document.getElementById('openHistoryFilterBtn');
+  if(openHistoryFilterBtn) openHistoryFilterBtn.onclick = ()=>{ state.modal = { type:'historyFilter' }; render(); };
+  const clearHistoryFilterBtn = document.getElementById('clearHistoryFilterBtn');
+  if(clearHistoryFilterBtn) clearHistoryFilterBtn.onclick = ()=>{ state.purchaseFilters = { startDate:'', endDate:'', supplierId:'', productQuery:'', category:'', payType:'' }; render(); };
+  const applyHistoryFilterBtn = document.getElementById('applyHistoryFilterBtn');
+  if(applyHistoryFilterBtn) applyHistoryFilterBtn.onclick = ()=>{
+    state.purchaseFilters = {
+      startDate: document.getElementById('filterStartDate').value,
+      endDate: document.getElementById('filterEndDate').value,
+      supplierId: document.getElementById('filterSupplier').value,
+      category: document.getElementById('filterCategory').value,
+      productQuery: document.getElementById('filterProductQuery').value.trim(),
+      payType: document.getElementById('filterPayType').value
+    };
+    state.modal = null; render();
+  };
+  const quickAddSupplierLink = document.getElementById('quickAddSupplierLink');
+  if(quickAddSupplierLink) quickAddSupplierLink.onclick = ()=> openSupplierModal(null);
+
   const purchaseSupplierSel = document.getElementById('purchaseSupplierSel');
   if(purchaseSupplierSel) purchaseSupplierSel.onchange = ()=>{ state.purchaseSupplierId = purchaseSupplierSel.value; };
+  const newSupplierBtn = document.getElementById('newSupplierBtn');
+  if(newSupplierBtn) newSupplierBtn.onclick = ()=>{
+    state.modal = { type:'supplier', data:{ id:null, name:'', phone:'', debt:0 }, returnTo:'purchaseEntry' };
+    render();
+  };
+  const newCategoryBtn = document.getElementById('newCategoryBtn');
+  if(newCategoryBtn) newCategoryBtn.onclick = ()=>{
+    state.modal = { type:'newCategory', returnTo:'purchaseEntry' };
+    render();
+  };
+  const newCategoryForm = document.getElementById('newCategoryForm');
+  if(newCategoryForm) newCategoryForm.onsubmit = (e)=>{
+    e.preventDefault();
+    const name = newCategoryForm.categoryName.value.trim();
+    if(!name){ flash('Ангиллын нэрийг оруулна уу', 'warm'); return; }
+    state.purchaseCategoryFilter = name;
+    state.modal = { type:'purchaseEntry' };
+    flash('Ангилал нэмэгдлээ - шинэ бараа бүртгэхэд ашиглагдана', 'accent');
+    render();
+  };
   document.querySelectorAll('[data-purchasepaytype]').forEach(el=> el.onclick = ()=>{ state.purchasePayType = el.dataset.purchasepaytype; render(); });
   const purchaseScanInput = document.getElementById('purchaseScanInput');
   if(purchaseScanInput){ purchaseScanInput.focus(); purchaseScanInput.onkeydown = (e)=>{ if(e.key==='Enter'){ handlePurchaseScanSubmit(purchaseScanInput.value); } }; }
@@ -818,15 +1141,43 @@ function attachHandlers(){
   if(purchaseScanGoBtn) purchaseScanGoBtn.onclick = ()=> handlePurchaseScanSubmit(document.getElementById('purchaseScanInput').value);
   const purchaseCameraScanBtn = document.getElementById('purchaseCameraScanBtn');
   if(purchaseCameraScanBtn) purchaseCameraScanBtn.onclick = ()=> openCameraModal('purchase');
-  const purchaseProductSel = document.getElementById('purchaseProductSel');
-  if(purchaseProductSel) purchaseProductSel.onchange = ()=>{ if(purchaseProductSel.value){ addToPurchaseCart(purchaseProductSel.value); purchaseProductSel.value=''; } };
-  document.querySelectorAll('[data-purqty]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.productId===el.dataset.purqty); if(c){ c.qty = parseFloat(el.value)||1; render(); } }; });
+  const purchaseCategoryFilterSel = document.getElementById('purchaseCategoryFilterSel');
+  if(purchaseCategoryFilterSel) purchaseCategoryFilterSel.onchange = ()=>{ state.purchaseCategoryFilter = purchaseCategoryFilterSel.value; render(); };
+  const purchaseProductNameInput = document.getElementById('purchaseProductNameInput');
+  const purchaseProductNameGoBtn = document.getElementById('purchaseProductNameGoBtn');
+  function submitPurchaseProductName(){
+    const raw = purchaseProductNameInput ? purchaseProductNameInput.value.trim() : '';
+    if(!raw) return;
+    const normalized = raw.toLowerCase().replace(/\s+/g,' ');
+    const match = state.products.find(p=> p.name.toLowerCase().replace(/\s+/g,' ') === normalized);
+    if(match){
+      addToPurchaseCart(match.id);
+      if(purchaseProductNameInput) purchaseProductNameInput.value='';
+    } else {
+      // олдсонгуй - шинэ бараа бүртгэх цонх нэрийг нь урьдчилан бичсэн байдлаар нээнэ
+      state.modal = { type:'product', data:{ id:null, barcode:'', name:raw, category: state.purchaseCategoryFilter||'', buyPrice:0, manualSellPrice:null, stock:0, minStock:5, supplierId: state.purchaseSupplierId||'' }, addToPurchaseAfterSave:true };
+      render();
+    }
+  }
+  if(purchaseProductNameGoBtn) purchaseProductNameGoBtn.onclick = submitPurchaseProductName;
+  if(purchaseProductNameInput) purchaseProductNameInput.onkeydown = (e)=>{ if(e.key==='Enter'){ e.preventDefault(); submitPurchaseProductName(); } };
+  document.querySelectorAll('[data-purqty]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.productId===el.dataset.purqty); if(c){ c.qty = Math.max(1, parseFloat(el.value)||1); render(); } }; });
   document.querySelectorAll('[data-purprice]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.productId===el.dataset.purprice); if(c){
-    c.price = parseFloat(el.value)||0;
+    c.price = Math.max(0, parseFloat(el.value)||0);
     render(); } }; });
   document.querySelectorAll('[data-rmpurcart]').forEach(el=>{ el.onclick = ()=> removeFromPurchaseCart(el.dataset.rmpurcart); });
   const submitPurchaseBtn = document.getElementById('submitPurchaseBtn');
   if(submitPurchaseBtn) submitPurchaseBtn.onclick = submitPurchase;
+
+  document.querySelectorAll('[data-editpurchase]').forEach(el=>{ el.onclick = ()=> openEditPurchaseModal(el.dataset.editpurchase); });
+  const editPurchaseSupplierSel = document.getElementById('editPurchaseSupplierSel');
+  if(editPurchaseSupplierSel) editPurchaseSupplierSel.onchange = ()=>{ state.editPurchaseSupplierId = editPurchaseSupplierSel.value; };
+  document.querySelectorAll('[data-editpurchasepaytype]').forEach(el=> el.onclick = ()=>{ state.editPurchasePayType = el.dataset.editpurchasepaytype; render(); });
+  document.querySelectorAll('[data-editpurqty]').forEach(el=>{ el.onchange = ()=>{ const c = state.editPurchaseCart.find(x=>x.productId===el.dataset.editpurqty); if(c){ c.qty = Math.max(1, parseFloat(el.value)||1); render(); } }; });
+  document.querySelectorAll('[data-editpurprice]').forEach(el=>{ el.onchange = ()=>{ const c = state.editPurchaseCart.find(x=>x.productId===el.dataset.editpurprice); if(c){ c.price = Math.max(0, parseFloat(el.value)||0); render(); } }; });
+  document.querySelectorAll('[data-rmeditpurcart]').forEach(el=>{ el.onclick = ()=>{ state.editPurchaseCart = state.editPurchaseCart.filter(c=>c.productId!==el.dataset.rmeditpurcart); render(); }; });
+  const submitPurchaseEditBtn = document.getElementById('submitPurchaseEditBtn');
+  if(submitPurchaseEditBtn) submitPurchaseEditBtn.onclick = submitPurchaseEdit;
 
   const addSupplierBtn = document.getElementById('addSupplierBtn');
   if(addSupplierBtn) addSupplierBtn.onclick = ()=> openSupplierModal(null);
@@ -849,9 +1200,15 @@ function attachHandlers(){
   if(rangeSelect) rangeSelect.onchange = ()=>{ state.reportRange = rangeSelect.value; render(); };
 
   const modalBg = document.getElementById('modalBg');
-  if(modalBg){ modalBg.onclick = (e)=>{ if(e.target===modalBg){ if(state.modal && state.modal.type==='camera'){ stopCameraScanner(); } state.modal=null; render(); } }; }
+  if(modalBg){ modalBg.onclick = (e)=>{ if(e.target===modalBg){ closeModalWithReturn(); } }; }
   const modalCancel = document.getElementById('modalCancel');
-  if(modalCancel) modalCancel.onclick = ()=>{ if(state.modal && state.modal.type==='camera'){ stopCameraScanner(); } state.modal=null; render(); };
+  if(modalCancel) modalCancel.onclick = ()=> closeModalWithReturn();
+  function closeModalWithReturn(){
+    if(state.modal && state.modal.type==='camera'){ stopCameraScanner(); }
+    const returnTo = state.modal ? state.modal.returnTo : null;
+    state.modal = returnTo==='purchaseEntry' ? { type:'purchaseEntry' } : null;
+    render();
+  }
   if(state.modal && state.modal.type==='camera' && document.getElementById('cameraReader') && !html5QrcodeInstance){
     startCameraScanner();
   }
@@ -878,11 +1235,16 @@ function attachHandlers(){
 
 initData().catch(function(e){ console.error('Эхлэл ачаалахад алдаа:', e); });
 
-// Service worker бүртгэх - зөвхөн HTTPS эсвэл localhost дээр ажиллана (file:// дээр биш)
+// Service worker бүртгэх - зөвхөн HTTPS эсвэл localhost дээр, мөн service-worker.js файл бодитоор байгаа үед л оролдоно
+// (Claude-ийн preview хуудсан дээр энэ файл байхгүй тул урьдчилан шалгаж, Console-д хэрэггүй алдаа гарахаас сэргийлнэ)
 if('serviceWorker' in navigator){
   window.addEventListener('load', function(){
-    navigator.serviceWorker.register('./service-worker.js').catch(function(e){
-      console.log('Service worker бүртгэгдсэнгүй (HTTPS хостинг шаардлагатай):', e);
+    fetch('./service-worker.js', { method: 'HEAD' }).then(function(res){
+      if(res.ok){
+        return navigator.serviceWorker.register('./service-worker.js');
+      }
+    }).catch(function(){
+      // service-worker.js олдсонгүй эсвэл сүлжээний алдаа - offline горим идэвхгүй хэвээр байх болно, программ бусад бүх функцээрээ хэвийн ажиллана
     });
   });
   // Шинэ хувилбар идэвхжмэгц хуудсыг автоматаар дахин ачаална - хэрэглэгч гараар юу ч хийх шаардлагагүй
