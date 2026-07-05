@@ -295,7 +295,7 @@ const mnt = n => Math.round(n||0).toLocaleString('mn-MN') + '\u20AE';
 const fmtDate = ts => new Date(ts).toLocaleDateString('mn-MN') + ' ' + new Date(ts).toLocaleTimeString('mn-MN',{hour:'2-digit',minute:'2-digit'});
 
 let state = {
-  tab: 'kass', loaded:false, modal:null, search:'', reportRange:'today',
+  tab: 'kass', loaded:false, modal:null, search:'', reportRange:'today', updateAvailable:false,
   products: [], suppliers: [], customers: [], sales: [], purchases: [], returns: [], spoilage: [],
   cart: [], cartCustomerId:'', cartPayType:'cash', cartEbarimt:'', kassCategoryFilter:null,
   purchaseCart: [], purchaseSupplierId:'', purchasePayType:'credit', purchaseDateOverride:false, purchaseDateValue:'',
@@ -491,11 +491,11 @@ function addToPurchaseCart(productId){
   const existing = state.purchaseCart.find(c=>c.productId===productId);
   if(existing){ existing.qty += 1; } else {
     const buyPrice = p.buyPrice||0;
-    state.purchaseCart.push({ productId, name:p.name, price:buyPrice, qty:1 });
+    state.purchaseCart.push({ cartItemId: uid(), productId, name:p.name, price:buyPrice, qty:1 });
   }
   render();
 }
-function removeFromPurchaseCart(productId){ state.purchaseCart = state.purchaseCart.filter(c=>c.productId!==productId); render(); }
+function removeFromPurchaseCart(cartItemId){ state.purchaseCart = state.purchaseCart.filter(c=>c.cartItemId!==cartItemId); render(); }
 function purchaseCartTotal(){ return state.purchaseCart.reduce((s,c)=>s+c.price*c.qty,0); }
 async function submitPurchase(){
   if(state.purchaseCart.length===0){ flash('Бараа сонгоно уу', 'warm'); return; }
@@ -509,6 +509,20 @@ async function submitPurchase(){
     custom.setHours(now.getHours(), now.getMinutes(), now.getSeconds()); // тухайн өдрийн доторх цагийг одоогийн цагаар тавина
     ts = custom.getTime();
   }
+  // Эхлээд "хүлээгдэж буй" (pending) шинэ бараа, засваруудыг ЯГ ОДОО л бодитоор бааз руу бичнэ - зөвхөн "Бүртгэх" дарсан үед
+  state.purchaseCart.forEach(c=>{
+    if(c.pendingNewProduct){
+      const pn = c.pendingNewProduct;
+      const product = { id: uid(), barcode: pn.barcode||'', name: c.name, category: pn.category||'', buyPrice: c.price, manualSellPrice: pn.manualSellPrice, stock: 0, minStock: 5, supplierId: pn.supplierId||state.purchaseSupplierId||'' };
+      state.products.push(product);
+      c.productId = product.id; // сая үүссэн бодит ID-г сагсны мөрөнд оноож, доорх items хуулбарт зөв орно
+      delete c.pendingNewProduct;
+    } else if(c.pendingEdit){
+      const p = state.products.find(x=>x.id===c.productId);
+      if(p){ p.name = c.pendingEdit.name; p.category = c.pendingEdit.category; p.buyPrice = c.pendingEdit.buyPrice; p.manualSellPrice = c.pendingEdit.manualSellPrice; }
+      delete c.pendingEdit;
+    }
+  });
   const purchase = { id: uid(), timestamp: ts, supplierId: state.purchaseSupplierId, items: state.purchaseCart.map(c=>({...c})), total, payType };
   state.purchaseCart.forEach(c=>{
     const p = state.products.find(x=>x.id===c.productId);
@@ -609,9 +623,17 @@ async function handlePurchaseScanSubmit(code){
     state.modal = { type:'quickNewProduct', data:{ productId:p.id, barcode:p.barcode||'', name:p.name, category:p.category||'', buyPrice:p.buyPrice||0, manualSellPrice:p.manualSellPrice, currentStock:p.stock||0, supplierId: state.purchaseSupplierId||p.supplierId||'' } };
     render();
   } else {
-    // шинэ баркод - шууд шинэ бараа бүртгэх цонх нээгдэнэ, хадгалсны дараа орлогын сагсанд автоматаар орно
-    state.modal = { type:'quickNewProduct', data:{ barcode:code.trim(), name:'', category: state.purchaseCategoryFilter||'', supplierId: state.purchaseSupplierId||'' } };
-    render();
+    // Хараахан бааз руу бичигдээгүй ч, сагсанд аль хэдийн "pending" байдлаар орсон эсэхийг шалгана (давхар цонх нээхгүй, шууд тоог нэмнэ)
+    const pendingItem = state.purchaseCart.find(c=>c.pendingNewProduct && c.pendingNewProduct.barcode===code.trim());
+    if(pendingItem){
+      pendingItem.qty += 1;
+      flash('Тоо нэмэгдлээ: ' + pendingItem.name + ' (' + pendingItem.qty + ')', 'accent');
+      render();
+    } else {
+      // цоо шинэ баркод - шинэ бараа бүртгэх цонх нээгдэнэ, "Бүртгэх" дарах хүртэл бааз руу бичигдэхгүй
+      state.modal = { type:'quickNewProduct', data:{ barcode:code.trim(), name:'', category: state.purchaseCategoryFilter||'', supplierId: state.purchaseSupplierId||'' } };
+      render();
+    }
   }
   const input = document.getElementById('purchaseScanInput');
   if(input){ input.value=''; }
@@ -737,7 +759,7 @@ function render(){
   const app = document.getElementById('app');
   if(!state.loaded){ app.innerHTML = '<div class="panel" style="text-align:center;padding:40px;color:var(--ink-soft)">Ачааллаж байна...</div>'; return; }
   app.innerHTML =
-    topbar() + tabs() +
+    topbar() + updateBanner() + tabs() +
     (state.tab==='kass' ? kassView() : '') +
     (state.tab==='baraa' ? baraaView() : '') +
     (state.tab==='huduldan' ? huduldanView() : '') +
@@ -749,6 +771,13 @@ function render(){
     (state.modal ? modalView() : '') +
     (state.flashMsg ? flashView() : '');
   attachHandlers();
+}
+function updateBanner(){
+  if(!state.updateAvailable) return '';
+  return '<div style="background:var(--gold-soft);border:1px solid var(--gold);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">' +
+    '<span style="font-size:13px;color:var(--ink);">\u{1F195} Шинэ хувилбар бэлэн боллоо. Ажлаа дуусгаад, дараа нь шинэчлээрэй.</span>' +
+    '<div style="display:flex;gap:6px;"><button class="btn btn-accent btn-sm" id="applyUpdateBtn">Одоо шинэчлэх</button><button class="btn btn-ghost btn-sm" id="dismissUpdateBtn">Дараа</button></div>' +
+    '</div>';
 }
 function topbar(){
   const pending = getPendingQueue().length;
@@ -892,10 +921,10 @@ function purchaseEntryModal(){
       const priceDiff = prevPrice>0 ? Math.abs(c.price - prevPrice)/prevPrice : 0;
       const priceWarn = priceDiff > 0.15 ? '<span style="color:var(--gold);font-size:11px;font-weight:600;white-space:nowrap;">\u26A0 \u04E9\u043C\u043D\u04E9\u0445: '+mnt(prevPrice)+'</span>' : '';
       return '<div class="trow" style="font-family:var(--sans);flex-wrap:wrap;gap:4px;"><span class="tname" style="min-width:90px;">'+esc(c.name)+'</span>' +
-      '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Тоо</span><input type="number" min="1" value="'+c.qty+'" data-purqty="'+c.productId+'" style="width:52px;padding:4px;" /></span>' +
-      '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Авсан үнэ</span><input type="number" min="0" value="'+c.price+'" data-purprice="'+c.productId+'" style="width:80px;padding:4px;" /></span>' +
+      '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Тоо</span><input type="number" min="1" value="'+c.qty+'" data-purqty="'+c.cartItemId+'" style="width:52px;padding:4px;" /></span>' +
+      '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Авсан үнэ</span><input type="number" min="0" value="'+c.price+'" data-purprice="'+c.cartItemId+'" style="width:80px;padding:4px;" /></span>' +
       priceWarn +
-      '<span class="rm" data-rmpurcart="'+c.productId+'" style="margin-left:2px;">x</span></div>';
+      '<span class="rm" data-rmpurcart="'+c.cartItemId+'" style="margin-left:2px;">x</span></div>';
     }).join('') : '<div class="muted" style="padding:14px 0;">Бараа алга</div>') + '</div>' +
     '<div class="ttotal"><span>Нийт төлөх</span><span>'+mnt(purchaseCartTotal())+'</span></div>' +
     '<div class="modal-actions"><button class="btn btn-accent" id="submitPurchaseBtn" '+(state.purchaseCart.length?'':'disabled')+'>Бүртгэх</button><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div>' +
@@ -1063,29 +1092,43 @@ async function saveQuickNewProduct(form){
   const qty = parseFloat(form.qty.value)||1;
   const buyPrice = parseFloat(form.buyPrice.value)||0;
   const manualSellPrice = (form.manualSellPrice.value.trim()!=='') ? (parseFloat(form.manualSellPrice.value)||0) : null;
-  let productId;
+
   if(d.productId){
-    // олдсон бараа - шинэчилнэ (үлдэгдэлд хүрэхгүй, зөвхөн мэдээллийг шинэчилнэ)
-    const p = state.products.find(x=>x.id===d.productId);
-    if(p){ p.name = name; p.category = category; p.buyPrice = buyPrice; p.manualSellPrice = manualSellPrice; }
-    productId = d.productId;
+    // Олдсон (аль хэдийн бүртгэлтэй) бараа - засварыг ЭНД шууд хадгалахгүй, зөвхөн сагсанд "хүлээгдэж буй засвар" болгож хадгална.
+    // Бодит хадгалалт зөвхөн эцсийн "Бүртгэх" товч дарахад л хийгдэнэ.
+    const pendingEdit = { name, category, buyPrice, manualSellPrice };
+    const existingCartItem = state.purchaseCart.find(c=>c.productId===d.productId);
+    if(existingCartItem){ existingCartItem.qty += qty; existingCartItem.price = buyPrice; existingCartItem.pendingEdit = pendingEdit; }
+    else { state.purchaseCart.push({ cartItemId: uid(), productId: d.productId, name, price: buyPrice, qty, pendingEdit }); }
   } else {
-    // шинэ бараа - Тоо нь эхний үлдэгдэл болно
-    const product = { id: uid(), barcode: d.barcode||'', name, category, buyPrice, manualSellPrice, stock: qty, minStock: 5, supplierId: d.supplierId||'' };
-    state.products.push(product);
-    productId = product.id;
+    // Шинэ бараа - state.products руу ОГТ бичихгүй. Зөвхөн сагсанд "хүлээгдэж буй шинэ бараа" болгож хадгална.
+    // Ижил баркодоор дахин скан хийвэл, тоог нь нэгтгэнэ (давхар мөр үүсэхгүй).
+    const tempKey = 'NEW::' + (d.barcode || name);
+    const existingPending = state.purchaseCart.find(c=>c.pendingNewProduct && c.pendingNewProduct._tempKey===tempKey);
+    if(existingPending){
+      existingPending.qty += qty;
+      existingPending.price = buyPrice;
+      existingPending.pendingNewProduct.category = category;
+      existingPending.pendingNewProduct.manualSellPrice = manualSellPrice;
+    } else {
+      state.purchaseCart.push({
+        cartItemId: uid(), productId: null, name, price: buyPrice, qty,
+        pendingNewProduct: { barcode: d.barcode||'', category, buyPrice, manualSellPrice, supplierId: d.supplierId||'', _tempKey: tempKey }
+      });
+    }
   }
-  await saveKey('pos:products', state.products);
-  const existingCartItem = state.purchaseCart.find(c=>c.productId===productId);
-  if(existingCartItem){ existingCartItem.qty += qty; existingCartItem.price = buyPrice; }
-  else { state.purchaseCart.push({ productId, name, price: buyPrice, qty }); }
   state.modal = { type:'purchaseEntry' }; // Нийлүүлэгчээс бараа авах цонх руу буцаж, цааш скан хийж болно
-  flash('Сагсанд нэмэгдлээ ✓', 'accent');
+  flash('Сагсанд нэмэгдлээ (зөвхөн "Бүртгэх" дарахад л албан ёсоор хадгалагдана)', 'accent');
   render();
 }
 async function deleteQuickProduct(){
   const d = state.modal.data;
-  if(!d.productId) return;
+  if(!d.productId){
+    // Хараахан хадгалагдаагүй (pending) шинэ бараа - зүгээр л сагснаас хасна, бааз руу огт бичигдээгүй тул устгах шаардлагагүй
+    state.modal = { type:'purchaseEntry' };
+    render();
+    return;
+  }
   if(!confirm('Энэ барааг бүрмөсөн устгах уу? Энэ үйлдлийг буцаах боломжгүй.')) return;
   state.products = state.products.filter(p=>p.id!==d.productId);
   state.purchaseCart = state.purchaseCart.filter(c=>c.productId!==d.productId);
@@ -1198,6 +1241,10 @@ function payAmountModal(){
 
 function attachHandlers(){
   document.querySelectorAll('[data-tab]').forEach(el=>{ el.onclick = ()=> setTab(el.dataset.tab); });
+  const applyUpdateBtn = document.getElementById('applyUpdateBtn');
+  if(applyUpdateBtn) applyUpdateBtn.onclick = ()=>{ window.location.reload(); };
+  const dismissUpdateBtn = document.getElementById('dismissUpdateBtn');
+  if(dismissUpdateBtn) dismissUpdateBtn.onclick = ()=>{ state.updateAvailable = false; render(); };
   const exportBackupBtn = document.getElementById('exportBackupBtn');
   if(exportBackupBtn) exportBackupBtn.onclick = exportBackup;
   const importBackupBtn = document.getElementById('importBackupBtn');
@@ -1325,8 +1372,8 @@ function attachHandlers(){
   }
   if(purchaseProductNameGoBtn) purchaseProductNameGoBtn.onclick = submitPurchaseProductName;
   if(purchaseProductNameInput) purchaseProductNameInput.onkeydown = (e)=>{ if(e.key==='Enter'){ e.preventDefault(); submitPurchaseProductName(); } };
-  document.querySelectorAll('[data-purqty]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.productId===el.dataset.purqty); if(c){ c.qty = Math.max(1, parseFloat(el.value)||1); render(); } }; });
-  document.querySelectorAll('[data-purprice]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.productId===el.dataset.purprice); if(c){
+  document.querySelectorAll('[data-purqty]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.cartItemId===el.dataset.purqty); if(c){ c.qty = Math.max(1, parseFloat(el.value)||1); render(); } }; });
+  document.querySelectorAll('[data-purprice]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.cartItemId===el.dataset.purprice); if(c){
     c.price = Math.max(0, parseFloat(el.value)||0);
     render(); } }; });
   document.querySelectorAll('[data-rmpurcart]').forEach(el=>{ el.onclick = ()=> removeFromPurchaseCart(el.dataset.rmpurcart); });
@@ -1372,8 +1419,16 @@ function attachHandlers(){
   const rangeSelect = document.getElementById('rangeSelect');
   if(rangeSelect) rangeSelect.onchange = ()=>{ state.reportRange = rangeSelect.value; render(); };
 
+  const NO_OUTSIDE_CLOSE_TYPES = ['purchaseEntry', 'quickNewProduct'];
   const modalBg = document.getElementById('modalBg');
-  if(modalBg){ modalBg.onclick = (e)=>{ if(e.target===modalBg){ closeModalWithReturn(); } }; }
+  if(modalBg){ modalBg.onclick = (e)=>{
+    if(e.target!==modalBg) return;
+    if(state.modal && NO_OUTSIDE_CLOSE_TYPES.includes(state.modal.type)){
+      flash('Гадна талбар дарахад хаагдахгүй - "Хаах"/"Болих" товчийг ашиглана уу', 'warm');
+      return;
+    }
+    closeModalWithReturn();
+  }; }
   const modalCancel = document.getElementById('modalCancel');
   if(modalCancel) modalCancel.onclick = ()=> closeModalWithReturn();
   function closeModalWithReturn(){
@@ -1420,12 +1475,11 @@ if('serviceWorker' in navigator){
       // service-worker.js олдсонгүй эсвэл сүлжээний алдаа - offline горим идэвхгүй хэвээр байх болно, программ бусад бүх функцээрээ хэвийн ажиллана
     });
   });
-  // Шинэ хувилбар идэвхжмэгц хуудсыг автоматаар дахин ачаална - хэрэглэгч гараар юу ч хийх шаардлагагүй
-  let swReloaded = false;
+  // Шинэ хувилбар идэвхжвэл АВТОМАТААР reload ХИЙХГҮЙ (энэ нь хэрэглэгч дундаа ажиллаж байхад мэдээлэл алдуулдаг байсан) -
+  // оронд нь зөвхөн зөөлөн мэдэгдэл (banner) харуулж, хэрэглэгч өөрөө хүссэн үедээ дарж шинэчилдэг болгоно.
   navigator.serviceWorker.addEventListener('controllerchange', function(){
-    if(swReloaded) return; // давхар reload хийхээс сэргийлнэ
-    swReloaded = true;
-    window.location.reload();
+    state.updateAvailable = true;
+    render();
   });
 }
 </script>
