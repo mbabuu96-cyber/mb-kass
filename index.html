@@ -364,6 +364,26 @@ function changeCartQty(productId, delta){
   c.qty = nq; render();
 }
 function cartTotal(){ return state.cart.reduce((s,c)=>s + c.price*c.qty, 0); }
+// Дэлгүүрийн ажилтан Ебаримтын хуудсанд буруу гараар шивж дүн зөрүүлэхгүйн тулд,
+// нийт төлбөрийн дүнг (цэвэр тоон утга, ₮ тэмдэггүй, таслалгүй) clipboard-руу хуулна.
+async function copyToClipboard(text){
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  }catch(e){ /* доор буцаад fallback-аар оролдоно */ }
+  try{
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position='fixed'; ta.style.left='-9999px'; ta.style.top='0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  }catch(e){ return false; }
+}
 function looksLikeLayoutMismatch(code){
   // Windows-ийн гарын хэл Кирилл дээр байхад баркод уншигчийн тоо энэ тэмдэгтүүд болж хувирдаг
   return /[№;%:?*_₮!@#\^&()]/.test(code);
@@ -429,7 +449,10 @@ async function checkout(){
   state.cart = []; state.cartCustomerId=''; state.cartPayType='cash'; state.cartEbarimt='';
   await saveKey('pos:products', state.products);
   await saveKey('pos:sales', state.sales);
-  flash('Худалдан авалт баталгаажлаа', 'accent');
+  // Мөнгөн дүн зөрөхөөс сэргийлж, төлбөр баталгаажмагц дүнг автоматаар хуулна -
+  // ажилтан гараар шивэхгүйгээр Ебаримт хуудсанд шууд paste хийж болно.
+  const copied = await copyToClipboard(String(Math.round(total)));
+  flash('Худалдан авалт баталгаажлаа' + (copied ? ' - Дүн ('+mnt(total)+') хуулагдлаа, Ебаримтад paste хийнэ үү' : ''), 'accent');
   render();
 }
 
@@ -921,7 +944,9 @@ function kassView(){
     (state.cart.length ? state.cart.map(c=>
       '<div class="trow"><span class="tname">'+esc(c.name)+'</span><span class="tqty"><span class="icon-btn" data-qtyminus="'+c.productId+'">-</span>'+c.qty+'<span class="icon-btn" data-qtyplus="'+c.productId+'">+</span></span><span class="tprice">'+mnt(c.price*c.qty)+'</span><span class="rm" data-rmcart="'+c.productId+'">x</span></div>'
     ).join('') : '<div class="empty-ticket">Сагс хоосон байна</div>') +
-    '<div class="ttotal"><span>Нийт</span><span>'+mnt(cartTotal())+'</span></div></div>' +
+    '<div class="ttotal"><span>Нийт</span><span>'+mnt(cartTotal())+'</span></div>' +
+    '<button class="btn btn-ghost btn-sm" type="button" id="copyTotalBtn" style="width:100%;margin-top:4px;" '+(state.cart.length?'':'disabled')+' title="Дүнг хуулж, Ебаримтын хуудсанд paste хийхэд бэлдэнэ">\u{1F4CB} Дүн хуулах (Ебаримтад paste хийхэд)</button>' +
+    '</div>' +
     '<div class="checkout-extra"><div class="paytype"><div class="opt '+(state.cartPayType==='cash'?'sel':'')+'" data-paytype="cash">Бэлэн</div><div class="opt '+(state.cartPayType==='credit'?'sel':'')+'" data-paytype="credit">Зээлээр</div><div class="opt '+(state.cartPayType==='qpay'?'sel':'')+'" data-paytype="qpay">Qpay/Данс</div><div class="opt '+(state.cartPayType==='pos'?'sel':'')+'" data-paytype="pos">POS</div></div>' +
     (state.cartPayType==='credit' ? '<select id="cartCustomerSel"><option value="">- Харилцагч сонгох -</option>'+custOpts+'</select>' : '') +
     '<input id="ebarimtInput" placeholder="Ебаримтын дугаар (заавал биш)" value="'+esc(state.cartEbarimt)+'" /></div>' +
@@ -1355,6 +1380,13 @@ function attachHandlers(){
   if(ebarimtInput) ebarimtInput.oninput = ()=>{ state.cartEbarimt = ebarimtInput.value; };
   const checkoutBtn = document.getElementById('checkoutBtn');
   if(checkoutBtn) checkoutBtn.onclick = checkout;
+  const copyTotalBtn = document.getElementById('copyTotalBtn');
+  if(copyTotalBtn) copyTotalBtn.onclick = async ()=>{
+    const total = cartTotal();
+    const ok = await copyToClipboard(String(Math.round(total)));
+    if(ok){ flash('Дүн хуулагдлаа: ' + mnt(total) + ' - Ебаримт хуудсанд paste хийнэ үү', 'accent'); }
+    else{ flash('Хуулж чадсангүй - гараар бичнэ үү: ' + mnt(total), 'warm'); }
+  };
 
   const baraaSearch = document.getElementById('baraaSearch');
   if(baraaSearch){ baraaSearch.oninput = ()=>{ state.search = baraaSearch.value; render();
