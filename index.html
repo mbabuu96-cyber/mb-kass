@@ -104,11 +104,11 @@
   .modal{ background:#fff; border-radius:12px; padding:20px; width:100%; max-width:460px; max-height:88vh; overflow:auto; }
   @media (max-width: 640px){
     .modal-bg{ padding:0; align-items:stretch; }
-    .modal{ max-width:100% !important; width:100% !important; max-height:100vh !important; height:100vh; border-radius:0; padding:16px; padding-top:20px; font-size:16px; }
-    .modal h3{ font-size:19px; }
+    .modal{ max-width:100% !important; width:100% !important; max-height:100vh !important; height:100vh; border-radius:0; padding:16px; overflow-y:auto; }
     .form-grid{ grid-template-columns:1fr !important; }
-    .modal input, .modal select { font-size:16px !important; padding:12px !important; }
-    .modal .btn { font-size:15px; padding:12px 16px; }
+    /* Камерын цонх стандарт (жижиг, төвд) хэмжээндээ үлдэнэ - бүтэн дэлгэц болгохгүй */
+    .modal-bg:has(.camera-modal-standard){ padding:16px; align-items:center; }
+    .camera-modal-standard{ max-width:400px !important; width:100% !important; height:auto !important; max-height:88vh !important; border-radius:12px !important; }
   }
   .modal h3{ margin-top:0; }
   .modal-actions{ display:flex; gap:8px; margin-top:14px; }
@@ -662,7 +662,7 @@ function startCameraScanner(){
     cameraRunning = false;
     html5QrcodeInstance.start(
       { facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 250, height: 150 } },
+      { fps: 10, qrbox: { width: 280, height: 200 } },
       (decodedText)=>{
         const code = decodedText;
         stopCameraScanner();
@@ -1180,7 +1180,7 @@ function editPurchaseModal(){
     '</div></div>';
 }
 function cameraModal(){
-  return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:400px;"><h3>Камераар скан хийх</h3>' +
+  return '<div class="modal-bg" id="modalBg"><div class="modal camera-modal-standard" style="max-width:400px;"><h3>Камераар скан хийх</h3>' +
     '<div id="cameraReader" style="width:100%;border-radius:8px;overflow:hidden;"></div>' +
     '<div class="muted" style="margin-top:8px;font-size:12px;">Баркодыг камерын хугжимд тохируулна уу. Автоматаар танигдана.</div>' +
     '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></div></div>';
