@@ -243,12 +243,13 @@ function attachLayoutSafeBarcodeInput(inputEl, onEnter){
     // Үсэг зэрэг бусад товчлуурыг хэвийн зөвшөөрнө (зарим баркод үсэг агуулж болно)
   });
 }
-const BACKUP_KEYS = ['pos:products','pos:suppliers','pos:customers','pos:sales','pos:purchases','pos:returns','pos:spoilage'];
+const BACKUP_KEYS = ['pos:products','pos:suppliers','pos:customers','pos:sales','pos:purchases','pos:returns','pos:spoilage','pos:expenses'];
 function exportBackup(){
   try{
     const backup = {
       products: state.products, suppliers: state.suppliers, customers: state.customers,
       sales: state.sales, purchases: state.purchases, returns: state.returns, spoilage: state.spoilage,
+      expenses: state.expenses,
       exportedAt: new Date().toISOString()
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
@@ -273,6 +274,7 @@ async function importBackupFromFile(file){
     state.purchases = backup.purchases || [];
     state.returns = backup.returns || [];
     state.spoilage = backup.spoilage || [];
+    state.expenses = backup.expenses || [];
     await saveKey('pos:products', state.products);
     await saveKey('pos:suppliers', state.suppliers);
     await saveKey('pos:customers', state.customers);
@@ -280,6 +282,7 @@ async function importBackupFromFile(file){
     await saveKey('pos:purchases', state.purchases);
     await saveKey('pos:returns', state.returns);
     await saveKey('pos:spoilage', state.spoilage);
+    await saveKey('pos:expenses', state.expenses);
     flash('Нөөцөөс амжилттай сэргээгдлээ', 'accent');
     render();
   }catch(e){ flash('Файл уншихад алдаа гарлаа - зөв JSON файл эсэхийг шалгана уу', 'warm'); }
@@ -297,6 +300,16 @@ function debtStatusBadge(entity){
 function getSupplierTotalInvoiced(supplierId){
   return state.purchases.filter(pu=>pu.supplierId===supplierId).reduce((sum,pu)=>sum+(pu.total||0),0);
 }
+function getSupplierLastPurchaseDate(supplierId){
+  const pus = state.purchases.filter(pu=>pu.supplierId===supplierId);
+  if(!pus.length) return null;
+  return Math.max(...pus.map(pu=>pu.timestamp));
+}
+function getSupplierLastPaymentDate(supplier){
+  const hist = supplier.paymentHistory || [];
+  if(!hist.length) return null;
+  return Math.max(...hist.map(h=>h.timestamp));
+}
 function statusOnlyBadge(entity){
   const debt = entity.debt||0; const paid = entity.paidTotal||0;
   if(debt<=0) return '<span class="badge paid">Төлсөн</span>';
@@ -307,15 +320,17 @@ function payTypeBadge(pt){
   if(pt==='credit') return '<span class="badge blue">Зээл</span>';
   if(pt==='qpay') return '<span class="badge partial">Qpay/Данс</span>';
   if(pt==='pos') return '<span class="badge ok">POS</span>';
+  if(pt==='household') return '<span class="badge low">Өрхийн хэрэглээ</span>';
   return '<span class="badge ok">Бэлэн</span>';
 }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const mnt = n => Math.round(n||0).toLocaleString('mn-MN') + '\u20AE';
 const fmtDate = ts => new Date(ts).toLocaleDateString('mn-MN') + ' ' + new Date(ts).toLocaleTimeString('mn-MN',{hour:'2-digit',minute:'2-digit'});
 
+const EXPENSE_CATEGORIES = ['Цахилгаан','Интернэт','Цалин','Түрээс','Тээвэр','Уут сав','Засвар','Өрхийн хэрэглээ','Бусад'];
 let state = {
   tab: 'kass', loaded:false, modal:null, search:'', reportRange:'today', updateAvailable:false,
-  products: [], suppliers: [], customers: [], sales: [], purchases: [], returns: [], spoilage: [],
+  products: [], suppliers: [], customers: [], sales: [], purchases: [], returns: [], spoilage: [], expenses: [],
   cart: [], cartCustomerId:'', cartPayType:'cash', cartEbarimt:'', kassCategoryFilter:null,
   purchaseCart: [], purchaseSupplierId:'', purchasePayType:'credit', purchaseDateOverride:false, purchaseDateValue:'',
   purchaseEntryOpen:false, historyFilterOpen:false,
@@ -332,6 +347,7 @@ async function initData(){
   state.purchases  = await loadKey('pos:purchases', []);
   state.returns    = await loadKey('pos:returns', []);
   state.spoilage   = await loadKey('pos:spoilage', []);
+  state.expenses   = await loadKey('pos:expenses', []);
   state.loaded = true;
   render();
 }
@@ -432,9 +448,13 @@ async function checkout(){
     if(!p){ flash('Бараа олдсонгүй: ' + c.name + '. Сагснаас хасна уу', 'warm'); return; }
     if(c.qty > p.stock){ flash('Үлдэгдэл хүрэлцэхгүй: ' + p.name + ' (одоо үлдэгдэл ' + p.stock + ')', 'warm'); return; }
   }
-  const total = cartTotal();
+  const isHousehold = state.cartPayType === 'household';
+  // "Өрхийн хэрэглээ" бол жинхэнэ борлуулалт биш - мөнгө орж ирдэггүй тул ЗАРАХ ҮНЭ биш
+  // АВСАН ҮНЭ (өртөг)-өөр бүртгэж, зардал/алдагдал болгон тооцно. Үлдэгдэл хэвийн бууна.
+  const items = state.cart.map(c=> isHousehold ? {...c, price: c.buyPrice||0} : {...c});
+  const total = isHousehold ? items.reduce((s,it)=>s+it.price*it.qty,0) : cartTotal();
   const sale = {
-    id: uid(), timestamp: Date.now(), items: state.cart.map(c=>({...c})), total,
+    id: uid(), timestamp: Date.now(), items, total,
     customerId: state.cartCustomerId || null,
     payType: state.cartPayType,
     ebarimt: state.cartEbarimt.trim() || null
@@ -449,10 +469,23 @@ async function checkout(){
   state.cart = []; state.cartCustomerId=''; state.cartPayType='cash'; state.cartEbarimt='';
   await saveKey('pos:products', state.products);
   await saveKey('pos:sales', state.sales);
-  // Мөнгөн дүн зөрөхөөс сэргийлж, төлбөр баталгаажмагц дүнг автоматаар хуулна -
-  // ажилтан гараар шивэхгүйгээр Ебаримт хуудсанд шууд paste хийж болно.
-  const copied = await copyToClipboard(String(Math.round(total)));
-  flash('Худалдан авалт баталгаажлаа' + (copied ? ' - Дүн ('+mnt(total)+') хуулагдлаа, Ебаримтад paste хийнэ үү' : ''), 'accent');
+  if(isHousehold){
+    // Борлуулалт таб дээрх "Өрхийн хэрэглээ"-г Зарлага табтай холбоно: барааны өртгийг
+    // автоматаар Зарлагын бүртгэлд "Өрхийн хэрэглээ" ангиллаар нэмж, 2 системийг нэгтгэнэ.
+    const itemsDesc = items.map(it=>it.name+' x'+it.qty).join(', ');
+    state.expenses.push({
+      id: uid(), timestamp: sale.timestamp, category: 'Өрхийн хэрэглээ', amount: total,
+      note: 'Борлуулалт табнаас автоматаар: ' + itemsDesc, sourceSaleId: sale.id
+    });
+    await saveKey('pos:expenses', state.expenses);
+    // Өрхийн хэрэглээ бол мөнгөн орлого биш тул Ебаримтад paste хийх шаардлагагүй
+    flash('Өрхийн хэрэглээ бүртгэгдлээ - үлдэгдэл хасагдаж, Зарлага табанд (өртгөөр) автоматаар нэмэгдлээ', 'accent');
+  } else {
+    // Мөнгөн дүн зөрөхөөс сэргийлж, төлбөр баталгаажмагц дүнг автоматаар хуулна -
+    // ажилтан гараар шивэхгүйгээр Ебаримт хуудсанд шууд paste хийж болно.
+    const copied = await copyToClipboard(String(Math.round(total)));
+    flash('Худалдан авалт баталгаажлаа' + (copied ? ' - Дүн ('+mnt(total)+') хуулагдлаа, Ебаримтад paste хийнэ үү' : ''), 'accent');
+  }
   render();
 }
 
@@ -522,6 +555,9 @@ async function paySupplierDebt(id, amount){
   const s = state.suppliers.find(x=>x.id===id); if(!s) return;
   s.debt = Math.max(0, (s.debt||0) - amount);
   s.paidTotal = (s.paidTotal||0) + amount;
+  // Төлбөр бүрийг огноотойгоор нь тусад нь бүртгэж, хэсэгчлэн төлсөн түүхийг хадгална
+  if(!s.paymentHistory) s.paymentHistory = [];
+  s.paymentHistory.push({ id: uid(), timestamp: Date.now(), amount });
   await saveKey('pos:suppliers', state.suppliers); render();
 }
 
@@ -834,6 +870,42 @@ async function saveSpoilage(form){
   state.modal = null; flash('Хоргодол бүртгэгдлээ', 'accent'); render();
 }
 
+function openExpenseModal(expense){
+  state.modal = { type:'expense', data: expense ? {...expense} : {
+    id:null, category: EXPENSE_CATEGORIES[0], amount:0, note:'',
+    dateStr: new Date().toISOString().slice(0,10)
+  }};
+  render();
+}
+async function saveExpense(form){
+  const d = state.modal.data;
+  const category = form.category.value;
+  const amount = parseFloat(form.amount.value)||0;
+  const note = form.note.value.trim();
+  const dateStr = form.dateStr.value;
+  if(amount<=0){ flash('Дүнг зөв оруулна уу', 'warm'); return; }
+  if(!dateStr){ flash('Огноог оруулна уу', 'warm'); return; }
+  const timestamp = new Date(dateStr + 'T12:00:00').getTime();
+  if(d.id){
+    const idx = state.expenses.findIndex(x=>x.id===d.id);
+    if(idx>-1){ state.expenses[idx] = {...state.expenses[idx], category, amount, note, timestamp}; }
+  } else {
+    state.expenses.push({ id: uid(), timestamp, category, amount, note });
+  }
+  await saveKey('pos:expenses', state.expenses);
+  state.modal = null; flash('Зарлага бүртгэгдлээ', 'accent'); render();
+}
+async function deleteExpense(id){
+  const exp = state.expenses.find(x=>x.id===id);
+  const msg = exp && exp.sourceSaleId
+    ? 'Энэ бол Борлуулалт табнаас автоматаар үүссэн зарлага. Устгавал зөвхөн Зарлагын жагсаалтаас арилна, харин Борлуулалт/Тайлан дахь анхны бүртгэл хэвээр үлдэнэ. Устгах уу?'
+    : 'Энэ зарлагыг устгах уу?';
+  if(!confirm(msg)) return;
+  state.expenses = state.expenses.filter(x=>x.id!==id);
+  await saveKey('pos:expenses', state.expenses);
+  flash('Зарлага устгагдлаа', 'accent'); render();
+}
+
 function rangeStart(range){
   const now = new Date();
   if(range==='today'){ return new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime(); }
@@ -865,6 +937,7 @@ function render(){
     (state.tab==='harilzagch' ? harilzagchView() : '') +
     (state.tab==='butsaalt' ? butsaaltView() : '') +
     (state.tab==='horogdol' ? horogdolView() : '') +
+    (state.tab==='zarlaga' ? zarlagaView() : '') +
     (state.tab==='tailan' ? tailanView() : '') +
     (state.modal ? modalView() : '') +
     (state.flashMsg ? flashView() : '');
@@ -892,7 +965,7 @@ function topbar(){
 }
 function tabs(){
   const items = [ ['kass','Борлуулалт'], ['baraa','Бараа'], ['huduldan','Орлого'], ['niiluulegch','Нийлүүлэгч'],
-    ['harilzagch','Харилцагч'], ['butsaalt','Буцаалт'], ['horogdol','Хоргодол'], ['tailan','Тайлан'] ];
+    ['harilzagch','Харилцагч'], ['butsaalt','Буцаалт'], ['horogdol','Хоргодол'], ['zarlaga','Зарлага'], ['tailan','Тайлан'] ];
   return '<div class="tabs">' + items.map(([k,l])=>'<div class="tab ' + (state.tab===k?'active':'') + '" data-tab="'+k+'">'+l+'</div>').join('') + '</div>';
 }
 function flashView(){
@@ -945,11 +1018,14 @@ function kassView(){
       '<div class="trow"><span class="tname">'+esc(c.name)+'</span><span class="tqty"><span class="icon-btn" data-qtyminus="'+c.productId+'">-</span>'+c.qty+'<span class="icon-btn" data-qtyplus="'+c.productId+'">+</span></span><span class="tprice">'+mnt(c.price*c.qty)+'</span><span class="rm" data-rmcart="'+c.productId+'">x</span></div>'
     ).join('') : '<div class="empty-ticket">Сагс хоосон байна</div>') +
     '<div class="ttotal"><span>Нийт</span><span>'+mnt(cartTotal())+'</span></div>' +
-    '<button class="btn btn-ghost btn-sm" type="button" id="copyTotalBtn" style="width:100%;margin-top:4px;" '+(state.cart.length?'':'disabled')+' title="Дүнг хуулж, Ебаримтын хуудсанд paste хийхэд бэлдэнэ">\u{1F4CB} Дүн хуулах (Ебаримтад paste хийхэд)</button>' +
+    (state.cartPayType!=='household' ? '<button class="btn btn-ghost btn-sm" type="button" id="copyTotalBtn" style="width:100%;margin-top:4px;" '+(state.cart.length?'':'disabled')+' title="Дүнг хуулж, Ебаримтын хуудсанд paste хийхэд бэлдэнэ">\u{1F4CB} Дүн хуулах (Ебаримтад paste хийхэд)</button>' : '') +
     '</div>' +
-    '<div class="checkout-extra"><div class="paytype"><div class="opt '+(state.cartPayType==='cash'?'sel':'')+'" data-paytype="cash">Бэлэн</div><div class="opt '+(state.cartPayType==='credit'?'sel':'')+'" data-paytype="credit">Зээлээр</div><div class="opt '+(state.cartPayType==='qpay'?'sel':'')+'" data-paytype="qpay">Qpay/Данс</div><div class="opt '+(state.cartPayType==='pos'?'sel':'')+'" data-paytype="pos">POS</div></div>' +
+    '<div class="checkout-extra"><div class="paytype"><div class="opt '+(state.cartPayType==='cash'?'sel':'')+'" data-paytype="cash">Бэлэн</div><div class="opt '+(state.cartPayType==='credit'?'sel':'')+'" data-paytype="credit">Зээлээр</div><div class="opt '+(state.cartPayType==='qpay'?'sel':'')+'" data-paytype="qpay">Qpay/Данс</div><div class="opt '+(state.cartPayType==='pos'?'sel':'')+'" data-paytype="pos">POS</div><div class="opt '+(state.cartPayType==='household'?'sel':'')+'" data-paytype="household" title="Эзэн/ажилтан өөрсдөө хэрэглэхээр авсан бараа - мөнгө орж ирэхгүй, өртгөөр нь зардал болгож бүртгэнэ">Өрхийн хэрэглээ</div></div>' +
     (state.cartPayType==='credit' ? '<select id="cartCustomerSel"><option value="">- Харилцагч сонгох -</option>'+custOpts+'</select>' : '') +
-    '<input id="ebarimtInput" placeholder="Ебаримтын дугаар (заавал биш)" value="'+esc(state.cartEbarimt)+'" /></div>' +
+    (state.cartPayType==='household' ?
+      '<div class="info-note">\u{1F4E6} Энэ бол борлуулалт биш - <b>эзэн/ажилтан өөрсдөө хэрэглэхээр</b> авч буй бараа. Мөнгө орж ирэхгүй тул Ебаримт шаардлагагүй. Үлдэгдэл хасагдаж, дараах <b>ӨРТГӨӨР</b> зардал/алдагдал болгож бүртгэгдэнэ: <b>'+mnt(state.cart.reduce((s,c)=>s+(c.buyPrice||0)*c.qty,0))+'</b></div>'
+      : '<input id="ebarimtInput" placeholder="Ебаримтын дугаар (заавал биш)" value="'+esc(state.cartEbarimt)+'" />') +
+    '</div>' +
     '<button class="btn btn-accent btn-block" style="margin-top:10px;" id="checkoutBtn" '+(state.cart.length?'':'disabled')+'>Төлбөр тооцох</button></div></div>';
 }
 
@@ -1085,8 +1161,12 @@ function purchaseHistoryRows(){
 
 function niiluulegchView(){
   return '<div class="panel"><div class="toolbar"><h2 style="margin:0;">Нийлүүлэгчид (Өглөг)</h2><button class="btn btn-accent" id="addSupplierBtn">+ Шинэ нийлүүлэгч</button></div>' +
-    '<div class="table-wrap"><table><thead><tr><th>Нэр</th><th>Утас</th><th style="text-align:right">Дүн</th><th>Төлөв</th><th></th></tr></thead><tbody>' +
-    (state.suppliers.map(s=>'<tr><td>'+esc(s.name)+'</td><td class="muted">'+esc(s.phone||'-')+'</td><td class="num">'+mnt(getSupplierTotalInvoiced(s.id))+'</td><td>'+statusOnlyBadge(s)+'</td><td style="text-align:right; white-space:nowrap;"><button class="icon-btn" data-suppay="'+s.id+'" title="Төлбөр төлөх">pay</button><button class="icon-btn" data-editsupplier="'+s.id+'">edit</button><button class="icon-btn" data-delsupplier="'+s.id+'">del</button></td></tr>').join('') || '<tr><td colspan="5" class="muted" style="padding:20px 0;">Нийлүүлэгч алга байна</td></tr>') +
+    '<div class="table-wrap"><table><thead><tr><th>Нэр</th><th>Утас</th><th style="text-align:right">Дүн</th><th>Сүүлд бараа авсан</th><th>Сүүлд төлбөр төлсөн</th><th>Төлөв</th><th></th></tr></thead><tbody>' +
+    (state.suppliers.map(s=>{
+      const lastPurchase = getSupplierLastPurchaseDate(s.id);
+      const lastPayment = getSupplierLastPaymentDate(s);
+      return '<tr><td>'+esc(s.name)+'</td><td class="muted">'+esc(s.phone||'-')+'</td><td class="num">'+mnt(getSupplierTotalInvoiced(s.id))+'</td><td class="muted">'+(lastPurchase?fmtDate(lastPurchase):'-')+'</td><td class="muted">'+(lastPayment?fmtDate(lastPayment):'-')+'</td><td>'+statusOnlyBadge(s)+'</td><td style="text-align:right; white-space:nowrap;"><button class="icon-btn" data-suppay="'+s.id+'" title="Төлбөр төлөх">pay</button><button class="icon-btn" data-supphist="'+s.id+'" title="Төлбөрийн түүх (хэсэгчлэн төлсөн бүх огноо)">түүх</button><button class="icon-btn" data-editsupplier="'+s.id+'">edit</button><button class="icon-btn" data-delsupplier="'+s.id+'">del</button></td></tr>';
+    }).join('') || '<tr><td colspan="7" class="muted" style="padding:20px 0;">Нийлүүлэгч алга байна</td></tr>') +
     '</tbody></table></div></div>';
 }
 
@@ -1115,8 +1195,31 @@ function horogdolView(){
     '</tbody></table></div></div>';
 }
 
+function zarlagaView(){
+  const list = state.expenses.slice().sort((a,b)=>b.timestamp-a.timestamp);
+  const totalAll = list.reduce((s,x)=>s+x.amount,0);
+  // Ангилалаар задаргаа - аль зардал хамгийн их байгааг харах
+  const byCat = {};
+  EXPENSE_CATEGORIES.forEach(c=>byCat[c]=0);
+  list.forEach(x=>{ byCat[x.category] = (byCat[x.category]||0) + x.amount; });
+  const catRows = EXPENSE_CATEGORIES.map(c=>'<tr><td>'+esc(c)+'</td><td class="num">'+mnt(byCat[c]||0)+'</td></tr>').join('');
+  return '<div class="panel"><div class="toolbar"><h2 style="margin:0;">Зарлага</h2><button class="btn btn-accent" id="addExpenseBtn">+ Зарлага бүртгэх</button></div>' +
+    '<div class="info-note">Цахилгаан, түрээс, цалин зэрэг дэлгүүрийн ерөнхий зардлыг эндээс бүртгэнэ. Барааны үлдэгдэлд нөлөөлөхгүй.</div>' +
+    '<div class="stats-row"><div class="stat"><div class="lbl">Нийт зарлага (бүх цаг)</div><div class="val">'+mnt(totalAll)+'</div></div></div>' +
+    '<h2 style="margin-top:18px;">Ангилалаар задаргаа</h2><div class="table-wrap"><table><thead><tr><th>Төрөл</th><th style="text-align:right">Нийт дүн</th></tr></thead><tbody>' + catRows + '</tbody></table></div>' +
+    '<h2 style="margin-top:18px;">Бүртгэлийн түүх</h2><div class="table-wrap"><table><thead><tr><th>Огноо</th><th>Төрөл</th><th>Тайлбар</th><th style="text-align:right">Дүн</th><th></th></tr></thead><tbody>' +
+    (list.length ? list.map(x=>'<tr><td class="muted">'+fmtDate(x.timestamp)+'</td><td><span class="badge blue">'+esc(x.category)+'</span></td><td class="muted">'+esc(x.note||'-')+(x.sourceSaleId?' <span class="badge ok" title="Борлуулалт табнаас автоматаар үүссэн">Автомат</span>':'')+'</td><td class="num">'+mnt(x.amount)+'</td><td style="text-align:right; white-space:nowrap;">'+(x.sourceSaleId?'':'<button class="icon-btn" data-editexpense="'+x.id+'">edit</button>')+'<button class="icon-btn" data-delexpense="'+x.id+'">del</button></td></tr>').join('') : '<tr><td colspan="5" class="muted" style="padding:20px 0;">Зарлага алга байна</td></tr>') +
+    '</tbody></table></div></div>';
+}
+
 function tailanView(){
-  const sales = filteredSales();
+  const allSales = filteredSales();
+  // "Өрхийн хэрэглээ" бол жинхэнэ мөнгөн орлого биш тул орлого/ашгийн тооцооноос гаргаж,
+  // тусад нь зардал (өртгөөр) байдлаар харуулна.
+  const sales = allSales.filter(s=>s.payType!=='household');
+  const householdSales = allSales.filter(s=>s.payType==='household');
+  const householdTotal = householdSales.reduce((s,x)=>s+x.total,0);
+  const householdCount = householdSales.length;
   const total = sales.reduce((s,x)=>s+x.total,0);
   const count = sales.length;
   const avg = count ? total/count : 0;
@@ -1129,11 +1232,12 @@ function tailanView(){
     '<div class="stats-row"><div class="stat"><div class="lbl">Нийт орлого</div><div class="val">'+mnt(total)+'</div></div><div class="stat"><div class="lbl">Нийт ашиг</div><div class="val">'+mnt(profit)+'</div></div><div class="stat"><div class="lbl">Худалдан авалтын тоо</div><div class="val">'+count+'</div></div><div class="stat"><div class="lbl">Дундаж чек</div><div class="val">'+mnt(avg)+'</div></div></div>' +
     '<h2>Төлбөрийн төрлөөр задаргаа (мөнгө тулгахад)</h2>' +
     '<div class="stats-row"><div class="stat"><div class="lbl">Бэлэн</div><div class="val">'+mnt(byType.cash)+'</div></div><div class="stat"><div class="lbl">Зээл</div><div class="val">'+mnt(byType.credit)+'</div></div><div class="stat"><div class="lbl">Qpay/Данс</div><div class="val">'+mnt(byType.qpay)+'</div></div><div class="stat"><div class="lbl">POS</div><div class="val">'+mnt(byType.pos)+'</div></div></div>' +
-    '<div class="stats-row"><div class="stat"><div class="lbl">Нийт авлага</div><div class="val">'+mnt(totalReceivable())+'</div></div><div class="stat"><div class="lbl">Нийт өглөг</div><div class="val">'+mnt(totalPayable())+'</div></div></div>' +
+    '<div class="stats-row"><div class="stat"><div class="lbl">Нийт авлага</div><div class="val">'+mnt(totalReceivable())+'</div></div><div class="stat"><div class="lbl">Нийт өглөг</div><div class="val">'+mnt(totalPayable())+'</div></div><div class="stat"><div class="lbl">Өрхийн хэрэглээ (зардал, өртгөөр)</div><div class="val">'+mnt(householdTotal)+'</div></div></div>' +
+    (householdCount ? '<div class="info-note">\u{1F4E6} Энэ хугацаанд <b>'+householdCount+'</b> удаа өрхийн хэрэглээгээр бараа авсан бөгөөд нийт <b>'+mnt(householdTotal)+'</b> (өртгөөр) зардал/алдагдал болж бүртгэгдсэн. Энэ дүн дээрх "Нийт орлого"-д ОРООГҮЙ болно.</div>' : '') +
     '<h2>Хамгийн их зарагдсан бараа</h2><div class="table-wrap"><table><thead><tr><th>Бараа</th><th style="text-align:right">Зарагдсан тоо</th></tr></thead><tbody>' +
     (top.length ? top.map(([name,qty])=>'<tr><td>'+esc(name)+'</td><td class="num">'+qty+'</td></tr>').join('') : '<tr><td colspan="2" class="muted" style="padding:16px 0;">Дата алга байна</td></tr>') + '</tbody></table></div>' +
-    '<h2 style="margin-top:18px;">Сүүлийн орлогын баримтууд</h2><div class="table-wrap"><table><thead><tr><th>Огноо</th><th>Дүн</th><th>Төлбөр</th><th>Ебаримт</th></tr></thead><tbody>' +
-    (sales.slice().reverse().slice(0,15).map(s=>'<tr><td class="muted">'+fmtDate(s.timestamp)+'</td><td class="num">'+mnt(s.total)+'</td><td>'+payTypeBadge(s.payType)+'</td><td class="muted">'+esc(s.ebarimt||'-')+'</td></tr>').join('') || '<tr><td colspan="4" class="muted" style="padding:14px 0;">Дата алга</td></tr>') +
+    '<h2 style="margin-top:18px;">Сүүлийн бүртгэлүүд</h2><div class="table-wrap"><table><thead><tr><th>Огноо</th><th>Дүн</th><th>Төлбөр</th><th>Ебаримт</th></tr></thead><tbody>' +
+    (allSales.slice().reverse().slice(0,15).map(s=>'<tr><td class="muted">'+fmtDate(s.timestamp)+'</td><td class="num">'+mnt(s.total)+'</td><td>'+payTypeBadge(s.payType)+'</td><td class="muted">'+esc(s.ebarimt||'-')+'</td></tr>').join('') || '<tr><td colspan="4" class="muted" style="padding:14px 0;">Дата алга</td></tr>') +
     '</tbody></table></div></div>';
 }
 
@@ -1143,7 +1247,9 @@ function modalView(){
   if(state.modal.type==='customer') return customerModal();
   if(state.modal.type==='return') return returnModal();
   if(state.modal.type==='spoilage') return spoilageModal();
+  if(state.modal.type==='expense') return expenseModal();
   if(state.modal.type==='payAmount') return payAmountModal();
+  if(state.modal.type==='supplierPayHistory') return supplierPayHistoryModal();
   if(state.modal.type==='camera') return cameraModal();
   if(state.modal.type==='purchaseEntry') return purchaseEntryModal();
   if(state.modal.type==='historyFilter') return historyFilterModal();
@@ -1331,6 +1437,16 @@ function spoilageModal(){
     '<div class="full"><label>Тайлбар</label><input name="note" /></div></div>' +
     '<div class="modal-actions"><button type="submit" class="btn btn-warm">Бүртгэх</button><button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></form></div></div>';
 }
+function expenseModal(){
+  const d = state.modal.data;
+  const catOpts = EXPENSE_CATEGORIES.map(c=>'<option value="'+esc(c)+'" '+(d.category===c?'selected':'')+'>'+esc(c)+'</option>').join('');
+  return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>'+(d.id?'Зарлага засах':'Зарлага бүртгэх')+'</h3><form id="expenseForm"><div class="form-grid">' +
+    '<div class="full"><label>Төрөл</label><select name="category" required>'+catOpts+'</select></div>' +
+    '<div><label>Огноо</label><input name="dateStr" type="date" value="'+esc(d.dateStr||new Date(d.timestamp||Date.now()).toISOString().slice(0,10))+'" required /></div>' +
+    '<div><label>Дүн (\u20AE)</label><input name="amount" type="number" min="0" step="1" value="'+(d.amount||'')+'" required /></div>' +
+    '<div class="full"><label>Тайлбар</label><input name="note" value="'+esc(d.note||'')+'" placeholder="Заавал биш" /></div></div>' +
+    '<div class="modal-actions"><button type="submit" class="btn btn-warm">'+(d.id?'Хадгалах':'Бүртгэх')+'</button><button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></form></div></div>';
+}
 function payAmountModal(){
   const d = state.modal.data;
   const label = d.kind==='supplier' ? 'Төлөх дүн' : 'Хүлээн авах дүн';
@@ -1338,6 +1454,18 @@ function payAmountModal(){
     '<div class="muted" style="margin-bottom:10px;">Одоогийн '+(d.kind==='supplier'?'өглөг':'авлага')+': '+mnt(d.currentDebt)+'</div>' +
     '<form id="payForm"><div class="form-grid"><div class="full"><label>'+label+'</label><input name="amount" type="number" min="0" step="1" value="'+d.currentDebt+'" required /></div></div>' +
     '<div class="modal-actions"><button type="submit" class="btn btn-accent">Баталгаажуулах</button><button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></form></div></div>';
+}
+function supplierPayHistoryModal(){
+  const d = state.modal.data;
+  const s = state.suppliers.find(x=>x.id===d.supplierId);
+  const hist = (s && s.paymentHistory) ? s.paymentHistory.slice().sort((a,b)=>b.timestamp-a.timestamp) : [];
+  const totalPaid = hist.reduce((sum,h)=>sum+h.amount,0);
+  return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>'+esc(s?s.name:'')+' - Төлбөрийн түүх</h3>' +
+    '<div class="muted" style="margin-bottom:10px;">Нийт төлсөн (бүх цаг): <b>'+mnt(totalPaid)+'</b></div>' +
+    '<div class="table-wrap" style="max-height:320px;overflow-y:auto;"><table><thead><tr><th>Огноо</th><th style="text-align:right">Төлсөн дүн</th></tr></thead><tbody>' +
+    (hist.length ? hist.map(h=>'<tr><td class="muted">'+fmtDate(h.timestamp)+'</td><td class="num">'+mnt(h.amount)+'</td></tr>').join('') : '<tr><td colspan="2" class="muted" style="padding:16px 0;">Төлбөрийн түүх алга байна</td></tr>') +
+    '</tbody></table></div>' +
+    '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div></div></div>';
 }
 
 function attachHandlers(){
@@ -1526,6 +1654,7 @@ function attachHandlers(){
   document.querySelectorAll('[data-editsupplier]').forEach(el=>{ el.onclick = ()=> openSupplierModal(state.suppliers.find(s=>s.id===el.dataset.editsupplier)); });
   document.querySelectorAll('[data-delsupplier]').forEach(el=>{ el.onclick = ()=> deleteSupplier(el.dataset.delsupplier); });
   document.querySelectorAll('[data-suppay]').forEach(el=>{ el.onclick = ()=>{ const s = state.suppliers.find(x=>x.id===el.dataset.suppay); state.modal = {type:'payAmount', data:{kind:'supplier', id:s.id, name:s.name, currentDebt:s.debt||0}}; render(); }; });
+  document.querySelectorAll('[data-supphist]').forEach(el=>{ el.onclick = ()=>{ state.modal = {type:'supplierPayHistory', data:{supplierId:el.dataset.supphist}}; render(); }; });
 
   const addCustomerBtn = document.getElementById('addCustomerBtn');
   if(addCustomerBtn) addCustomerBtn.onclick = ()=> openCustomerModal(null);
@@ -1537,6 +1666,10 @@ function attachHandlers(){
   if(addReturnBtn) addReturnBtn.onclick = openReturnModal;
   const addSpoilageBtn = document.getElementById('addSpoilageBtn');
   if(addSpoilageBtn) addSpoilageBtn.onclick = openSpoilageModal;
+  const addExpenseBtn = document.getElementById('addExpenseBtn');
+  if(addExpenseBtn) addExpenseBtn.onclick = ()=> openExpenseModal();
+  document.querySelectorAll('[data-editexpense]').forEach(el=>{ el.onclick = ()=> openExpenseModal(state.expenses.find(x=>x.id===el.dataset.editexpense)); });
+  document.querySelectorAll('[data-delexpense]').forEach(el=>{ el.onclick = ()=> deleteExpense(el.dataset.delexpense); });
 
   const rangeSelect = document.getElementById('rangeSelect');
   if(rangeSelect) rangeSelect.onchange = ()=>{ state.reportRange = rangeSelect.value; render(); };
@@ -1576,6 +1709,8 @@ function attachHandlers(){
   if(returnForm) returnForm.onsubmit = (e)=>{ e.preventDefault(); saveReturn(returnForm); };
   const spoilageForm = document.getElementById('spoilageForm');
   if(spoilageForm) spoilageForm.onsubmit = (e)=>{ e.preventDefault(); saveSpoilage(spoilageForm); };
+  const expenseForm = document.getElementById('expenseForm');
+  if(expenseForm) expenseForm.onsubmit = (e)=>{ e.preventDefault(); saveExpense(expenseForm); };
   const payForm = document.getElementById('payForm');
   if(payForm) payForm.onsubmit = (e)=>{ e.preventDefault();
     const amount = parseFloat(payForm.amount.value)||0; const d = state.modal.data;
