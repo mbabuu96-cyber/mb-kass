@@ -102,6 +102,14 @@
   .stats-row{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:16px; }
   .modal-bg{ position:fixed; inset:0; background:rgba(21,36,32,.4); display:flex; align-items:center; justify-content:center; z-index:50; padding:16px; }
   .modal{ background:#fff; border-radius:12px; padding:20px; width:100%; max-width:460px; max-height:88vh; overflow:auto; }
+  @media (max-width: 640px){
+    .modal-bg{ padding:0; align-items:stretch; }
+    .modal{ max-width:100% !important; width:100% !important; max-height:100vh !important; height:100vh; border-radius:0; padding:16px; padding-top:20px; font-size:16px; }
+    .modal h3{ font-size:19px; }
+    .form-grid{ grid-template-columns:1fr !important; }
+    .modal input, .modal select { font-size:16px !important; padding:12px !important; }
+    .modal .btn { font-size:15px; padding:12px 16px; }
+  }
   .modal h3{ margin-top:0; }
   .modal-actions{ display:flex; gap:8px; margin-top:14px; }
   .icon-btn{ background:transparent; border:none; cursor:pointer; color:var(--ink-soft); font-size:15px; padding:4px 6px; }
@@ -912,7 +920,8 @@ function purchaseEntryModal(){
     '</div>' +
     '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Баркод скан хийх</label>' +
     '<div class="scan-row" style="margin-bottom:8px;"><input id="purchaseScanInput" placeholder="Баркод скан хийх..." autocomplete="off" /><button class="btn btn-accent" id="purchaseScanGoBtn">Нэмэх</button>'+(isMobileDevice()?'<button class="btn btn-blue" id="purchaseCameraScanBtn" title="Камераар скан хийх">Камер</button>':'')+'</div>' +
-    '<div class="muted" style="font-size:11px;margin-bottom:12px;">Байгаа баркодыг сканнавал шууд сагсанд орно. Шинэ (бүртгэлгүй) баркод бол шинэ бараа бүртгэх цонх нээгдэнэ.</div>' +
+    '<div class="muted" style="font-size:11px;margin-bottom:8px;">Байгаа баркодыг сканнавал шууд сагсанд орно. Шинэ (бүртгэлгүй) баркод бол шинэ бараа бүртгэх цонх нээгдэнэ.</div>' +
+    '<div style="margin-bottom:12px;"><span class="rm" id="noBarcodeProductLink" style="color:var(--accent);cursor:pointer;text-decoration:underline;font-size:12px;">+ Баркодгүй бараа нэмэх (жимс, ногоо гэх мэт)</span></div>' +
     '<h2 style="margin-top:14px;">Худалдан авалтын сагс</h2>' +
     '<div class="cart-items-box">' +
     (state.purchaseCart.length ? state.purchaseCart.map(c=>{
@@ -1352,6 +1361,11 @@ function attachHandlers(){
   if(purchaseScanGoBtn) purchaseScanGoBtn.onclick = ()=> handlePurchaseScanSubmit(document.getElementById('purchaseScanInput').value);
   const purchaseCameraScanBtn = document.getElementById('purchaseCameraScanBtn');
   if(purchaseCameraScanBtn) purchaseCameraScanBtn.onclick = ()=> openCameraModal('purchase');
+  const noBarcodeProductLink = document.getElementById('noBarcodeProductLink');
+  if(noBarcodeProductLink) noBarcodeProductLink.onclick = ()=>{
+    state.modal = { type:'quickNewProduct', data:{ barcode:'', name:'', category:'', supplierId: state.purchaseSupplierId||'' } };
+    render();
+  };
   const purchaseCategoryFilterSel = document.getElementById('purchaseCategoryFilterSel');
   if(purchaseCategoryFilterSel) purchaseCategoryFilterSel.onchange = ()=>{ state.purchaseCategoryFilter = purchaseCategoryFilterSel.value; render(); };
   const purchaseProductNameInput = document.getElementById('purchaseProductNameInput');
