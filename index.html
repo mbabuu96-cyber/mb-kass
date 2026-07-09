@@ -362,6 +362,17 @@ async function initData(){
   state.qpayQr     = await loadKey('pos:qpayQr', DEFAULT_QPAY_QR);
   state.loaded = true;
   render();
+  // Апп нээгдэх бүрд үлдэгдлүүд гүйлгээний түүхтэйгээ таарч буй эсэхийг автоматаар шалгаж,
+  // зөрөө илэрвэл шууд анхааруулна - алдаа удаан анзаарагдалгүй хуримтлагдахаас сэргийлнэ.
+  setTimeout(function(){
+    try{
+      let mismatch = 0;
+      state.products.forEach(p=>{ if(Math.max(0, computeStockFromLedgers(p.id)) !== (p.stock||0)) mismatch++; });
+      if(mismatch > 0){
+        flash('Анхаар: '+mismatch+' барааны үлдэгдэл гүйлгээний түүхээс зөрж байна. Бараа таб \u2192 "Үлдэгдэл тулгах" товчоор засна уу', 'warm');
+      }
+    }catch(e){ /* шалгалт амжилтгүй бол чимээгүй өнгөрөөнө */ }
+  }, 800);
 }
 function setTab(t){ state.tab=t; state.search=''; render(); }
 function esc(s){ return (s??'').toString().replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
@@ -449,7 +460,14 @@ async function handleScanSubmit(code){
   const input = document.getElementById('scanInput');
   if(input){ input.value=''; input.focus(); }
 }
+// Гүйлгээний түгжээ: Хадгалах/Тооцох товчийг санамсаргүй 2 удаа хурдан дарахад гүйлгээ
+// давхардаж, үлдэгдэл 2 дахин нэмэгдэх/хасагдахаас сэргийлнэ.
+let txLock = false;
 async function checkout(){
+  if(txLock) return; txLock = true;
+  try{ await checkoutInner(); } finally { txLock = false; }
+}
+async function checkoutInner(){
   if(state.cart.length===0) return;
   if(state.cartPayType==='credit' && !state.cartCustomerId){
     flash('Зээлээр борлуулахын тулд харилцагч сонгоно уу', 'warm'); return;
@@ -629,6 +647,10 @@ function addToPurchaseCart(productId){
 function removeFromPurchaseCart(cartItemId){ state.purchaseCart = state.purchaseCart.filter(c=>c.cartItemId!==cartItemId); render(); }
 function purchaseCartTotal(){ return state.purchaseCart.reduce((s,c)=>s+c.price*c.qty,0); }
 async function submitPurchase(){
+  if(txLock) return; txLock = true;
+  try{ await submitPurchaseInner(); } finally { txLock = false; }
+}
+async function submitPurchaseInner(){
   if(state.purchaseCart.length===0){ flash('Бараа сонгоно уу', 'warm'); return; }
   if(!state.purchaseSupplierId){ flash('Нийлүүлэгч сонгоно уу', 'warm'); return; }
   const total = purchaseCartTotal();
@@ -691,28 +713,39 @@ function openEditPurchaseModal(purchaseId){
   render();
 }
 async function submitPurchaseEdit(){
+  if(txLock) return; txLock = true;
+  try{ await submitPurchaseEditInner(); } finally { txLock = false; }
+}
+async function submitPurchaseEditInner(){
   const pu = state.purchases.find(x=>x.id===state.editPurchaseId);
   if(!pu){ flash('Орлого олдсонгүй', 'warm'); return; }
   if(state.editPurchaseCart.length===0){ flash('Бараа сонгоно уу', 'warm'); return; }
   if(!state.editPurchaseSupplierId){ flash('Нийлүүлэгч сонгоно уу', 'warm'); return; }
 
-  // 1-р алхам: ХУУЧИН гүйлгээний нөлөөг бүрэн буцаана (үлдэгдэл, өглөг)
+  // 1-2-р алхам: ХУУЧИН ба ШИНЭ гүйлгээний зөрүүг (delta) бараа тус бүрээр НЭГ УДАА тооцож хэрэглэнэ.
+  // Өмнө нь "эхлээд хасаад (0-д хамгаалж), дараа нь нэмэх" аргаар хийдэг байсан нь үлдэгдэл
+  // завсартаа 0-с доош орох тохиолдолд тоог хийсвэрээр ӨСГӨДӨГ алдаатай байсан тул ингэж зассан.
   const oldSupplier = state.suppliers.find(s=>s.id===pu.supplierId);
+  const deltaByProduct = {};
   pu.items.forEach(oldItem=>{
-    const p = state.products.find(x=>x.id===oldItem.productId);
-    if(p) p.stock = Math.max(0, (p.stock||0) - oldItem.qty);
+    deltaByProduct[oldItem.productId] = (deltaByProduct[oldItem.productId]||0) - oldItem.qty;
+  });
+  state.editPurchaseCart.forEach(c=>{
+    deltaByProduct[c.productId] = (deltaByProduct[c.productId]||0) + c.qty;
+  });
+  Object.keys(deltaByProduct).forEach(pid=>{
+    const p = state.products.find(x=>x.id===pid);
+    if(!p) return;
+    const next = (p.stock||0) + deltaByProduct[pid];
+    p.stock = Math.max(0, next);
+    if(next < 0){ flash('Анхаар: "'+p.name+'" үлдэгдэл 0-с доош орох тооцоо гарсан тул 0 болголоо. "Үлдэгдэл тулгах" товчоор шалгана уу', 'warm'); }
   });
   if(oldSupplier && (pu.payType||'credit')==='credit'){
     oldSupplier.debt = Math.max(0, (oldSupplier.debt||0) - pu.total);
   }
 
-  // 2-р алхам: ШИНЭ (засварласан) гүйлгээний нөлөөг тооцож нэмнэ
   const newTotal = state.editPurchaseCart.reduce((s,c)=>s+c.price*c.qty,0);
   const newSupplier = state.suppliers.find(s=>s.id===state.editPurchaseSupplierId);
-  state.editPurchaseCart.forEach(c=>{
-    const p = state.products.find(x=>x.id===c.productId);
-    if(p){ p.stock = (p.stock||0) + c.qty; }
-  });
   if(newSupplier && state.editPurchasePayType==='credit'){
     if((newSupplier.debt||0)===0){ newSupplier.paidTotal = 0; }
     newSupplier.debt = (newSupplier.debt||0) + newTotal;
@@ -772,6 +805,39 @@ async function handlePurchaseScanSubmit(code){
 
 let html5QrcodeInstance = null;
 let cameraRunning = false;
+let cameraTorchOn = false;
+let cameraTorchSupported = false;
+let cameraZoomCaps = null; // {min,max,step} - төхөөрөмж дэмждэг бол
+let cameraZoomLevel = 2;
+function cameraControlsHtml(){
+  let h = '';
+  if(cameraTorchSupported){
+    h += '<button type="button" class="btn btn-ghost btn-sm" id="torchToggleBtn">'+(cameraTorchOn?'\u{1F526} Гэрэл унтраах':'\u{1F526} Гэрэл асаах')+'</button>';
+  }
+  if(cameraZoomCaps){
+    h += '<button type="button" class="btn btn-ghost btn-sm" id="zoomOutBtn">\u2212 Zoom</button><button type="button" class="btn btn-ghost btn-sm" id="zoomInBtn">+ Zoom</button>';
+  }
+  return h;
+}
+function attachCameraControlHandlers(){
+  const torchBtn = document.getElementById('torchToggleBtn');
+  if(torchBtn) torchBtn.onclick = function(){
+    if(!html5QrcodeInstance || !html5QrcodeInstance.applyVideoConstraints) return;
+    cameraTorchOn = !cameraTorchOn;
+    html5QrcodeInstance.applyVideoConstraints({ advanced: [{ torch: cameraTorchOn }] }).catch(function(){ cameraTorchOn = false; });
+    torchBtn.textContent = cameraTorchOn ? '\u{1F526} Гэрэл унтраах' : '\u{1F526} Гэрэл асаах';
+  };
+  function applyZoom(delta){
+    if(!html5QrcodeInstance || !cameraZoomCaps || !html5QrcodeInstance.applyVideoConstraints) return;
+    const step = cameraZoomCaps.step || 0.5;
+    cameraZoomLevel = Math.min(cameraZoomCaps.max, Math.max(cameraZoomCaps.min||1, cameraZoomLevel + delta*Math.max(step,0.5)));
+    html5QrcodeInstance.applyVideoConstraints({ advanced: [{ zoom: cameraZoomLevel }] }).catch(function(){});
+  }
+  const zin = document.getElementById('zoomInBtn');
+  if(zin) zin.onclick = function(){ applyZoom(1); };
+  const zout = document.getElementById('zoomOutBtn');
+  if(zout) zout.onclick = function(){ applyZoom(-1); };
+}
 let cameraScanTarget = 'kass'; // 'kass' эсвэл 'purchase' - хаанаас дуудсанаас хамаарч оноогдоно
 // Буруу уншилтаас сэргийлэх баталгаажуулалтын төлөв: сүүлд уншсан код болон хэдэн удаа дараалан
 // ижил гарсныг хадгална. N удаа дараалан яг ижил код гарсны дараа л зөвшөөрнө.
@@ -780,6 +846,7 @@ const SCAN_CONFIRM_NEEDED = 2; // хэдэн удаа дараалан ижил 
 function openCameraModal(target){
   cameraScanTarget = target;
   scanConfirm = { lastCode:null, count:0 };
+  cameraTorchOn = false; cameraTorchSupported = false; cameraZoomCaps = null; cameraZoomLevel = 2;
   state.modal = { type:'camera', data:{} };
   render();
 }
@@ -804,11 +871,11 @@ function startCameraScanner(){
           const h = Math.floor(Math.min(viewfinderHeight * 0.45, w * 0.6));
           return { width: w, height: h };
         },
-        // Өндөр нягтралтай дүрс авах тусам жижиг/бүдэг баркодыг хурдан танина
+        // Өндөр нягтралтай дүрс авах тусам жижиг/бүдэг/холын баркодыг хурдан танина
         videoConstraints: {
           facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
         },
         // Зөвхөн дэлгүүрт бодитоор хэрэглэгддэг форматуудыг таньж, бусад формат хооронд
         // андуурч буруу уншихаас сэргийлнэ.
@@ -847,6 +914,26 @@ function startCameraScanner(){
       function(){ /* frame бүр амжилтгүй унших - хэвийн, дахин оролдоно */ }
     ).then(function(){
       cameraRunning = true; // энд ирснээр камер бодитоор эхэлсэн гэдгийг баталгаажуулна
+      // Хол зайнаас уншихад туслах: төхөөрөмж дэмждэг бол 2x ойртуулалт (zoom) болон
+      // тасралтгүй фокус (continuous focus)-ыг автоматаар идэвхжүүлнэ.
+      try{
+        const caps = html5QrcodeInstance.getRunningTrackCapabilities ? html5QrcodeInstance.getRunningTrackCapabilities() : null;
+        const adv = [];
+        if(caps && caps.zoom && caps.zoom.max){
+          cameraZoomCaps = caps.zoom;
+          adv.push({ zoom: Math.min(caps.zoom.max, Math.max(caps.zoom.min||1, 2)) });
+        } else { cameraZoomCaps = null; }
+        if(caps && caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('continuous')>-1){
+          adv.push({ focusMode: 'continuous' });
+        }
+        cameraTorchSupported = !!(caps && ('torch' in caps));
+        if(adv.length && html5QrcodeInstance.applyVideoConstraints){
+          html5QrcodeInstance.applyVideoConstraints({ advanced: adv }).catch(function(){});
+        }
+        // Гэрэл/zoom товчнуудын харагдацыг шинэчлэхийн тулд камерын удирдлагын хэсгийг дахин зурна
+        const ctrl = document.getElementById('cameraControls');
+        if(ctrl){ ctrl.innerHTML = cameraControlsHtml(); attachCameraControlHandlers(); }
+      }catch(e){ /* тухайн төхөөрөмж дэмжихгүй бол хэвийн үргэлжилнэ */ }
     }).catch(function(err){
       cameraRunning = false;
       const msg = (err && err.message) ? err.message : String(err);
@@ -905,6 +992,37 @@ function openSpoilageModal(){
   state.modal = { type:'spoilage', data:{ productId:'', qty:1, reason:'', note:'' } };
   render();
 }
+// Тухайн барааны үлдэгдлийг бүх гүйлгээний түүхээс (Орлого - Борлуулалт - Хоргодол + Хэвийн буцаалт)
+// дахин тооцоолно. Аль нэг засвар/алдаанаас болж үлдэгдэл зөрсөн үед үнэн тоог сэргээхэд ашиглана.
+function computeStockFromLedgers(productId){
+  let s = 0;
+  state.purchases.forEach(pu=>{ (pu.items||[]).forEach(it=>{ if(it.productId===productId) s += it.qty; }); });
+  state.sales.forEach(sa=>{ (sa.items||[]).forEach(it=>{ if(it.productId===productId) s -= it.qty; }); });
+  state.spoilage.forEach(r=>{ if(r.productId===productId) s -= r.qty; });
+  state.returns.forEach(r=>{ if(r.productId===productId && r.returnType==='normal') s += r.qty; });
+  return s;
+}
+async function reconcileAllStocks(){
+  // Эхлээд зөрүүтэй бараануудыг олж, хэрэглэгчид харуулж баталгаажуулна
+  const diffs = [];
+  state.products.forEach(p=>{
+    const computed = Math.max(0, computeStockFromLedgers(p.id));
+    if(computed !== (p.stock||0)){ diffs.push({p, from:(p.stock||0), to:computed}); }
+  });
+  if(diffs.length===0){ flash('Бүх барааны үлдэгдэл гүйлгээний түүхтэй таарч байна \u2714', 'accent'); return; }
+  const preview = diffs.slice(0,12).map(d=>'\u2022 '+d.p.name+': '+d.from+' \u2192 '+d.to).join('\n') + (diffs.length>12 ? '\n... нийт '+diffs.length+' бараа' : '');
+  const ok = confirm(
+    'Дараах '+diffs.length+' барааны үлдэгдэл гүйлгээний түүхээс зөрж байна:\n\n'+preview+
+    '\n\nАНХААР: Энэ тооцоо зөвхөн программд бүртгэгдсэн Орлого/Борлуулалт/Буцаалт/Хоргодлын түүх дээр үндэслэнэ. '+
+    'Хэрэв программ ашиглахаас ӨМНӨХ үлдэгдэл Орлогоор бүртгэгдээгүй бараа байвал тэр нь 0 болж магадгүй.\n\nЗасах уу?'
+  );
+  if(!ok) return;
+  diffs.forEach(d=>{ d.p.stock = d.to; });
+  await saveKey('pos:products', state.products);
+  flash(diffs.length+' барааны үлдэгдэл гүйлгээний түүхээс зөв тоогоор сэргээгдлээ', 'accent');
+  render();
+}
+
 async function saveSpoilage(form){
   const productId = form.productId.value; const qty = parseFloat(form.qty.value)||0;
   const reason = form.reason.value.trim(); const note = form.note.value.trim();
@@ -1145,7 +1263,7 @@ function baraaView(){
     const q = state.search.toLowerCase();
     return p.name.toLowerCase().includes(q) || (p.barcode||'').toLowerCase().includes(q);
   });
-  return '<div class="panel"><div class="toolbar"><input style="max-width:280px;" placeholder="Хайх..." id="baraaSearch" value="'+esc(state.search)+'" />' +
+  return '<div class="panel"><div class="toolbar"><input style="max-width:280px;" placeholder="Хайх..." id="baraaSearch" value="'+esc(state.search)+'" /><button class="btn btn-ghost btn-sm" id="reconcileStocksBtn" title="Бүх барааны үлдэгдлийг Орлого/Борлуулалт/Буцаалт/Хоргодлын түүхээс дахин тооцоолж, зөрүүг илрүүлж засна">Үлдэгдэл тулгах</button>' +
     '<div class="info-note" style="margin:0;flex:1;min-width:200px;">Шинэ бараа "Орлого" таб дээрээс бүртгэнэ (давхардал үүсэхээс сэргийлж энд шинээр нэмэх боломжгүй).</div></div>' +
     '<div style="position:relative;">' +
     '<div id="baraaTableScroll" class="table-wrap" style="max-height:480px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;">' +
@@ -1500,7 +1618,8 @@ function editPurchaseModal(){
 function cameraModal(){
   return '<div class="modal-bg" id="modalBg"><div class="modal camera-modal-standard" style="max-width:400px;"><h3>Камераар скан хийх</h3>' +
     '<div id="cameraReader" style="width:100%;border-radius:8px;overflow:hidden;"></div>' +
-    '<div class="muted" style="margin-top:8px;font-size:12px;">Баркодыг камерын хугжимд тохируулна уу. Автоматаар танигдана.</div>' +
+    '<div id="cameraControls" style="display:flex;gap:6px;justify-content:center;margin-top:8px;flex-wrap:wrap;">'+cameraControlsHtml()+'</div>' +
+    '<div class="muted" style="margin-top:8px;font-size:12px;">Баркодыг хүрээн дотор оруулахад автоматаар танигдана. Хол байвал + Zoom, харанхуйд Гэрэл ашиглана уу.</div>' +
     '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></div></div>';
 }
 function productModal(){
@@ -1694,6 +1813,8 @@ function attachHandlers(){
   const baraaSearch = document.getElementById('baraaSearch');
   if(baraaSearch){ baraaSearch.oninput = ()=>{ state.search = baraaSearch.value; render();
       const el=document.getElementById('baraaSearch'); if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); } }; }
+  const reconcileStocksBtn = document.getElementById('reconcileStocksBtn');
+  if(reconcileStocksBtn) reconcileStocksBtn.onclick = reconcileAllStocks;
   const baraaScrollUpBtn = document.getElementById('baraaScrollUpBtn');
   const baraaScrollDownBtn = document.getElementById('baraaScrollDownBtn');
   const baraaTableScroll = document.getElementById('baraaTableScroll');
