@@ -929,13 +929,18 @@ async function checkoutInner(){
   if(state.cartPayType==='credit'){
     const cust = state.customers.find(c=>c.id===state.cartCustomerId);
     if(cust){ if((cust.debt||0)===0){ cust.paidTotal = 0; } cust.debt = (cust.debt||0) + total; }
-    await saveKeyMerged('pos:customers', state.customers);
+    await saveKey('pos:customers', state.customers);
   }
   state.sales.push(sale);
   state.cart = []; state.cartCustomerId=''; state.cartPayType='cash'; state.cartEbarimt=''; state.cartDateOverride=false; state.cartDateValue='';
   state.cartCashReceived=''; state.cartSplitCash=''; state.cartSplitQpay=''; state.cartSplitPos='';
-  await saveKeyMerged('pos:products', state.products);
-  await saveKeyMerged('pos:sales', state.sales);
+  // ХУРДНЫ ЗАСВАР: Борлуулалт бол хамгийн олон удаа хийгдэх үйлдэл тул ЗААВАЛ хурдан байх
+  // ёстой. "Нэгтгэлт-хадгалалт" (saveKeyMerged) нь эхлээд cloud-оос уншиж байгаад л бичдэг
+  // тул нэмэлт сүлжээний хүсэлт үүсгэж, "Төлбөр тооцох" товч удаан гацахад хүргэдэг байсан.
+  // Үлдэгдлийн зөрүү гарвал Бараа таб-ын "Үлдэгдэл тулгах" товчоор засаж болдог тул энд
+  // энгийн, хурдан saveKey-г ашиглана.
+  await saveKey('pos:products', state.products);
+  await saveKey('pos:sales', state.sales);
   if(isHousehold){
     // Борлуулалт таб дээрх "Өрхийн хэрэглээ"-г Зарлага табтай холбоно: барааны өртгийг
     // автоматаар Зарлагын бүртгэлд "Өрхийн хэрэглээ" ангиллаар нэмж, 2 системийг нэгтгэнэ.
@@ -950,20 +955,22 @@ async function checkoutInner(){
   } else {
     // Хариулт өгөх мэдэгдэл: авсан мөнгө оруулсан бол хамгийн түрүүнд ТОМООР харуулна
     const changeMsg = (sale.changeGiven!=null && sale.changeGiven>0) ? ' | ХАРИУЛТ: '+mnt(sale.changeGiven) : '';
-    // ЕБАРИМТ АВТОМАТ ИЛГЭЭЛТ: тохиргоо идэвхтэй бол бэлэн/Qpay/POS/холимог борлуулалтын
-    // баримтыг PosAPI-аар шууд үүсгэнэ. Зээл нь мөнгө ороогүй тул илгээхгүй.
+    // ХУРДНЫ ЗАСВАР: Ебаримт илгээлтийг (PosAPI, локал сервис) ӨМНӨ НЬ "await" хийж
+    // ХҮЛЭЭДЭГ байсан тул PosAPI холбогдоогүй/удаан үед "Төлбөр тооцох" товч 6 секунд
+    // хүртэл ГАЦДАГ байсан (яг таны ажигласан алдаа). Худалдан авалт өөрөө аль хэдийн
+    // амжилттай хадгалагдчихсан тул кассчинд ШУУД мэдэгдэж, Ебаримтыг ар талд нь
+    // (дэвсгэрт) илгээнэ - амжилттай/амжилтгүй эсэхийг дараа нь тусад нь мэдэгдэнэ.
+    const copied = await copyToClipboard(String(Math.round(total)));
+    flash('Худалдан авалт баталгаажлаа'+changeMsg + (copied ? ' | Дүн ('+mnt(total)+') хуулагдлаа' : ''), 'accent');
     if(ebarimtReady() && ['cash','qpay','pos','mixed'].indexOf(sale.payType)>-1){
-      const r = await sendSaleToEbarimt(sale.id, true);
-      if(r.ok){
-        flash('Худалдан авалт баталгаажиж, Ебаримт үүслээ. Сугалаа: '+(sale.ebarimtReceipt&&sale.ebarimtReceipt.lottery||'-')+changeMsg, 'accent');
-      } else {
-        await queueEbarimt(sale.id);
-        flash('Худалдан авалт баталгаажлаа'+changeMsg+'. Ебаримт илгээгдсэнгүй ('+r.err+') - дараалалд орлоо', 'warm');
-      }
-    } else {
-      // Ебаримт идэвхгүй үеийн хуучин урсгал: дүнг хуулж, гараар paste хийнэ
-      const copied = await copyToClipboard(String(Math.round(total)));
-      flash('Худалдан авалт баталгаажлаа'+changeMsg + (copied ? ' | Дүн ('+mnt(total)+') хуулагдлаа' : ''), 'accent');
+      sendSaleToEbarimt(sale.id, true).then(r=>{
+        if(r.ok){
+          flash('\u2714 Ебаримт үүслээ. Сугалаа: '+(sale.ebarimtReceipt&&sale.ebarimtReceipt.lottery||'-'), 'accent');
+        } else {
+          queueEbarimt(sale.id);
+          flash('Ебаримт илгээгдсэнгүй ('+r.err+') - дараалалд орлоо', 'warm');
+        }
+      }).catch(()=>{ queueEbarimt(sale.id); });
     }
   }
   render();
@@ -1927,8 +1934,9 @@ function kassView(){
       const priceDisplay = (c.discountPct>0)
         ? '<span style="text-decoration:line-through;color:var(--ink-soft);font-size:11px;">'+mnt(c.price*c.qty)+'</span> <span style="color:var(--warm);font-weight:700;">'+mnt(eff*c.qty)+'</span>'
         : mnt(eff*c.qty);
-      return '<div class="trow"><span class="tname">'+esc(c.name)+(c.discountPct>0?' <span class="badge low" style="font-size:10px;">-'+c.discountPct+'%</span>':'')+'</span><span class="tqty"><span class="icon-btn" data-qtyminus="'+c.productId+'">-</span>'+c.qty+'<span class="icon-btn" data-qtyplus="'+c.productId+'">+</span></span><span class="tprice">'+priceDisplay+'</span><span class="icon-btn" data-discountitem="'+c.productId+'" title="Энэ бараанд хувийн хөнгөлөлт өгөх">\u{1F3F7}</span><span class="rm" data-rmcart="'+c.productId+'">x</span></div>';
+      return '<div class="trow"><span class="tname">'+esc(c.name)+(c.discountPct>0?' <span class="badge low" style="font-size:10px;">-'+c.discountPct+'%</span>':'')+'</span><span class="tqty"><span class="icon-btn" data-qtyminus="'+c.productId+'">-</span>'+c.qty+'<span class="icon-btn" data-qtyplus="'+c.productId+'">+</span></span><span class="tprice">'+priceDisplay+'</span><span class="icon-btn" data-discountitem="'+c.productId+'" title="2% хөнгөлөлт асаах/унтраах" style="'+(c.discountPct===2?'color:var(--accent);font-weight:700;':'')+'">'+(c.discountPct===2?'\u2714 2%':'\u{1F3F7}2%')+'</span><span class="rm" data-rmcart="'+c.productId+'">x</span></div>';
     }).join('') : '<div class="empty-ticket">Сагс хоосон байна</div>') +
+    (state.cart.length ? '<button type="button" class="btn btn-ghost btn-sm" id="discountAllBtn" style="width:100%;margin-top:6px;'+(state.cart.every(c=>c.discountPct===2)?'color:var(--accent);font-weight:700;':'')+'">'+(state.cart.every(c=>c.discountPct===2)?'\u2714 Бүх бараанд 2% хэрэгжсэн - унтраах':'\u{1F3F7} Бүх бараанд 2% хөнгөлөлт өгөх')+'</button>' : '') +
     '<div class="ttotal"><span>Нийт</span><span>'+mnt(cartTotal())+'</span></div>' +
     (state.cartPayType!=='household' ? '<button class="btn btn-ghost btn-sm" type="button" id="copyTotalBtn" style="width:100%;margin-top:4px;" '+(state.cart.length?'':'disabled')+' title="Дүнг хуулж, Ебаримтын хуудсанд paste хийхэд бэлдэнэ">\u{1F4CB} Дүн хуулах (Ебаримтад paste хийхэд)</button>' : '') +
     '</div>' +
@@ -2057,7 +2065,22 @@ function purchaseEntryModal(){
     '<div class="scan-row" style="margin-bottom:8px;"><input id="purchaseScanInput" placeholder="Баркод скан хийх..." autocomplete="off" /><button class="btn btn-accent" id="purchaseScanGoBtn">Нэмэх</button>'+(isMobileDevice()?'<button class="btn btn-blue" id="purchaseCameraScanBtn" title="Камераар скан хийх">Камер</button>':'')+'</div>' +
     '<div class="muted" style="font-size:11px;margin-bottom:8px;">Байгаа баркодыг сканнавал шууд сагсанд орно. Шинэ (бүртгэлгүй) баркод бол шинэ бараа бүртгэх цонх нээгдэнэ.</div>' +
     '<div style="margin-bottom:12px;"><span class="rm" id="noBarcodeProductLink" style="color:var(--accent);cursor:pointer;text-decoration:underline;font-size:12px;">+ Баркодгүй бараа нэмэх (жимс, ногоо гэх мэт)</span></div>' +
-    (state.purchaseCart.length ? '<div class="ttotal"><span>Баталгаажсан нийт дүн</span><span>'+mnt(purchaseCartTotal())+'</span></div>' : '') +
+    (state.purchaseCart.length ? (
+      '<h2 style="margin-top:14px;">Баркодоор бүртгэсэн бараа</h2>' +
+      '<div class="cart-items-box">' +
+      state.purchaseCart.map(c=>{
+        const p = state.products.find(x=>x.id===c.productId);
+        const prevPrice = p ? (p.buyPrice||0) : 0;
+        const priceDiff = prevPrice>0 ? Math.abs(c.price - prevPrice)/prevPrice : 0;
+        const priceWarn = priceDiff > 0.15 ? '<span style="color:var(--gold);font-size:11px;font-weight:600;white-space:nowrap;">\u26A0 \u04E9\u043C\u043D\u04E9\u0445: '+mnt(prevPrice)+'</span>' : '';
+        return '<div class="trow" style="font-family:var(--sans);flex-wrap:wrap;gap:4px;"><span class="tname" style="min-width:90px;">'+esc(c.name)+'</span>' +
+        '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Тоо</span><input type="number" min="1" value="'+c.qty+'" data-purqty="'+c.cartItemId+'" style="width:52px;padding:4px;" /></span>' +
+        '<span style="display:flex;align-items:center;gap:3px;"><span style="font-size:10px;color:var(--ink-soft);">Авсан үнэ</span><input type="number" min="0" value="'+c.price+'" data-purprice="'+c.cartItemId+'" style="width:80px;padding:4px;" /></span>' +
+        priceWarn +
+        '<span class="rm" data-rmpurcart="'+c.cartItemId+'" style="margin-left:2px;">x</span></div>';
+      }).join('') + '</div>' +
+      '<div class="ttotal"><span>Баталгаажсан нийт дүн</span><span>'+mnt(purchaseCartTotal())+'</span></div>'
+    ) : '') +
     '<div class="modal-actions"><button class="btn btn-accent" id="submitPurchaseBtn" '+(state.purchaseCart.length?'':'disabled')+'>Бүртгэх ('+state.purchaseCart.length+' бараа)</button><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div>' +
     '</div></div>';
 }
@@ -2119,7 +2142,7 @@ function niiluulegchView(){
     (state.suppliers.map(s=>{
       const lastPurchase = getSupplierLastPurchaseDate(s.id);
       const lastPayment = getSupplierLastPaymentDate(s);
-      return '<tr><td>'+esc(s.name)+'</td><td class="muted">'+esc(s.phone||'-')+'</td><td class="num">'+mnt(getSupplierTotalInvoiced(s.id))+'</td><td class="muted">'+(lastPurchase?fmtDate(lastPurchase):'-')+'</td><td class="muted">'+(lastPayment?fmtDate(lastPayment):'-')+'</td><td>'+statusOnlyBadge(s)+'</td><td style="text-align:right; white-space:nowrap;"><button class="icon-btn" data-suppay="'+s.id+'" title="Төлбөр төлөх">pay</button><button class="icon-btn" data-supphist="'+s.id+'" title="Төлбөрийн түүх (хэсэгчлэн төлсөн бүх огноо)">түүх</button><button class="icon-btn" data-editsupplier="'+s.id+'">edit</button><button class="icon-btn" data-delsupplier="'+s.id+'">del</button></td></tr>';
+      return '<tr><td>'+esc(s.name)+'</td><td class="muted">'+esc(s.phone||'-')+'</td><td class="num">'+mnt(getSupplierTotalInvoiced(s.id))+'</td><td class="muted">'+(lastPurchase?fmtDate(lastPurchase):'-')+'</td><td class="muted">'+(lastPayment?fmtDate(lastPayment):'-')+'</td><td>'+statusOnlyBadge(s)+'</td><td style="text-align:right; white-space:nowrap;"><button class="icon-btn" data-suppay="'+s.id+'" title="Төлбөр төлөх">pay</button><button class="icon-btn" data-supphist="'+s.id+'" title="Худалдан авалт болон төлбөрийн дэлгэрэнгүй түүх (өдөр бүрээр)">дэлгэрэнгүй</button><button class="icon-btn" data-editsupplier="'+s.id+'">edit</button><button class="icon-btn" data-delsupplier="'+s.id+'">del</button></td></tr>';
     }).join('') || '<tr><td colspan="7" class="muted" style="padding:20px 0;">Нийлүүлэгч алга байна</td></tr>') +
     '</tbody></table></div></div>';
 }
@@ -2170,6 +2193,57 @@ function zarlagaView(){
     '</tbody></table></div></div>';
 }
 
+// Тухайн барааны сар бүрийн зарагдсан тоог (сүүлийн 12 сар) харуулна - бүх борлуулалтын
+// түүхээс (Тайлангийн одоогийн шүүлтээс үл хамааран) тооцоолно.
+function productMonthlyModal(){
+  const d = state.modal.data;
+  const name = d.productName;
+  const byMonth = {};
+  state.sales.forEach(s=>{
+    if(s.payType==='household') return;
+    (s.items||[]).forEach(it=>{
+      if(it.name!==name) return;
+      const mk = new Date(s.timestamp).toISOString().slice(0,7); // YYYY-MM
+      if(!byMonth[mk]) byMonth[mk] = { qty:0, revenue:0 };
+      byMonth[mk].qty += it.qty; byMonth[mk].revenue += it.qty*it.price;
+    });
+  });
+  const months = Object.keys(byMonth).sort((a,b)=>b.localeCompare(a)).slice(0,12);
+  const totalQty = months.reduce((s,m)=>s+byMonth[m].qty,0);
+  return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>'+esc(name)+' - Сар тутмын борлуулалт</h3>' +
+    '<div class="muted" style="margin-bottom:10px;">Сүүлийн '+months.length+' сард нийт <b>'+totalQty+'</b> ширхэг зарагдсан</div>' +
+    '<div class="table-wrap" style="max-height:360px;overflow-y:auto;"><table><thead><tr><th>Сар</th><th style="text-align:right">Тоо</th><th style="text-align:right">Орлого</th></tr></thead><tbody>' +
+    (months.length ? months.map(m=>'<tr><td class="muted">'+m+'</td><td class="num">'+byMonth[m].qty+'</td><td class="num">'+mnt(byMonth[m].revenue)+'</td></tr>').join('') : '<tr><td colspan="3" class="muted" style="padding:16px 0;">Дата алга байна</td></tr>') +
+    '</tbody></table></div>' +
+    '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div></div></div>';
+}
+// Тухайн өдөрт зарагдсан бараануудын нэгтгэсэн жагсаалт + төлбөрийн төрлөөр задаргааг харуулна.
+function dayDetailModal(){
+  const d = state.modal.data;
+  const dateStr = d.dateStr;
+  const daySales = state.sales.filter(s=>{
+    if(s.payType==='household') return false;
+    return new Date(s.timestamp).toISOString().slice(0,10)===dateStr;
+  });
+  const byProduct = {};
+  daySales.forEach(s=>{ (s.items||[]).forEach(it=>{
+    if(!byProduct[it.name]) byProduct[it.name] = { qty:0, revenue:0 };
+    byProduct[it.name].qty += it.qty; byProduct[it.name].revenue += it.qty*it.price;
+  }); });
+  const products = Object.keys(byProduct).sort((a,b)=>byProduct[b].qty-byProduct[a].qty);
+  const byType = { cash:0, credit:0, qpay:0, pos:0 };
+  daySales.forEach(s=>addSaleToByType(byType, s));
+  const total = daySales.reduce((s,x)=>s+x.total,0);
+  return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:560px;"><h3>'+dateStr+' - Дэлгэрэнгүй</h3>' +
+    '<div class="stats-row"><div class="stat"><div class="lbl">Нийт дүн</div><div class="val">'+mnt(total)+'</div></div><div class="stat"><div class="lbl">Худалдан авалт</div><div class="val">'+daySales.length+'</div></div></div>' +
+    '<h4 style="margin:12px 0 6px;">Төлбөрийн төрлөөр</h4>' +
+    '<div class="stats-row"><div class="stat"><div class="lbl">Бэлэн</div><div class="val">'+mnt(byType.cash)+'</div></div><div class="stat"><div class="lbl">Зээл</div><div class="val">'+mnt(byType.credit)+'</div></div><div class="stat"><div class="lbl">Qpay/Данс</div><div class="val">'+mnt(byType.qpay)+'</div></div><div class="stat"><div class="lbl">POS</div><div class="val">'+mnt(byType.pos)+'</div></div></div>' +
+    '<h4 style="margin:14px 0 6px;">Зарагдсан бараа</h4>' +
+    '<div class="table-wrap" style="max-height:300px;overflow-y:auto;"><table><thead><tr><th>Бараа</th><th style="text-align:right">Тоо</th><th style="text-align:right">Орлого</th></tr></thead><tbody>' +
+    (products.length ? products.map(name=>'<tr><td>'+esc(name)+'</td><td class="num">'+byProduct[name].qty+'</td><td class="num">'+mnt(byProduct[name].revenue)+'</td></tr>').join('') : '<tr><td colspan="3" class="muted" style="padding:16px 0;">Дата алга байна</td></tr>') +
+    '</tbody></table></div>' +
+    '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div></div></div>';
+}
 function tailanView(){
   const allSales = filteredSales();
   // "Өрхийн хэрэглээ" бол жинхэнэ мөнгөн орлого биш тул орлого/ашгийн тооцооноос гаргаж,
@@ -2200,7 +2274,21 @@ function tailanView(){
     '<div class="stats-row"><div class="stat"><div class="lbl">Нийт авлага</div><div class="val">'+mnt(totalReceivable())+'</div></div><div class="stat"><div class="lbl">Нийт өглөг</div><div class="val">'+mnt(totalPayable())+'</div></div><div class="stat"><div class="lbl">Өрхийн хэрэглээ (зардал, өртгөөр)</div><div class="val">'+mnt(householdTotal)+'</div></div></div>' +
     (householdCount ? '<div class="info-note">\u{1F4E6} Энэ хугацаанд <b>'+householdCount+'</b> удаа өрхийн хэрэглээгээр бараа авсан бөгөөд нийт <b>'+mnt(householdTotal)+'</b> (өртгөөр) зардал/алдагдал болж бүртгэгдсэн. Энэ дүн дээрх "Нийт орлого"-д ОРООГҮЙ болно.</div>' : '') +
     '<h2>Хамгийн их зарагдсан бараа</h2><div class="table-wrap"><table><thead><tr><th>Бараа</th><th style="text-align:right">Зарагдсан тоо</th></tr></thead><tbody>' +
-    (top.length ? top.map(([name,qty])=>'<tr><td>'+esc(name)+'</td><td class="num">'+qty+'</td></tr>').join('') : '<tr><td colspan="2" class="muted" style="padding:16px 0;">Дата алга байна</td></tr>') + '</tbody></table></div>' +
+    (top.length ? top.map(([name,qty])=>'<tr><td><span class="rm" data-productmonthly="'+esc(name)+'" style="color:var(--accent);text-decoration:underline;">'+esc(name)+'</span></td><td class="num">'+qty+'</td></tr>').join('') : '<tr><td colspan="2" class="muted" style="padding:16px 0;">Дата алга байна</td></tr>') + '</tbody></table></div>' +
+    '<h2 style="margin-top:18px;">Өдөр тутмын дэлгэрэнгүй</h2><div class="muted" style="font-size:11px;margin-bottom:6px;">Өдөр дээр дарахад тухайн өдөр зарагдсан бараа, төлбөрийн төрлөөр задаргааг харна.</div>' +
+    '<div class="table-wrap"><table><thead><tr><th>Огноо</th><th style="text-align:right">Тоо</th><th style="text-align:right">Дүн</th><th></th></tr></thead><tbody>' +
+    (function(){
+      const byDate = {};
+      sales.forEach(s=>{
+        const ds = new Date(s.timestamp).toISOString().slice(0,10);
+        if(!byDate[ds]) byDate[ds] = { count:0, total:0 };
+        byDate[ds].count++; byDate[ds].total += s.total;
+      });
+      const dateKeys = Object.keys(byDate).sort((a,b)=>b.localeCompare(a));
+      if(dateKeys.length===0) return '<tr><td colspan="4" class="muted" style="padding:16px 0;">Дата алга байна</td></tr>';
+      return dateKeys.slice(0,30).map(ds=>'<tr><td class="muted"><span class="rm" data-daydetail="'+ds+'" style="color:var(--accent);text-decoration:underline;">'+ds+'</span></td><td class="num">'+byDate[ds].count+'</td><td class="num">'+mnt(byDate[ds].total)+'</td><td style="text-align:right;"><button class="icon-btn" data-daydetail="'+ds+'" title="Дэлгэрэнгүй харах">\u{1F4CB}</button></td></tr>').join('');
+    })() +
+    '</tbody></table></div>' +
     '<h2 style="margin-top:18px;">Сүүлийн бүртгэлүүд</h2><div class="table-wrap"><table><thead><tr><th>Огноо</th><th>Дүн</th><th>Төлбөр</th><th>Ебаримт</th><th></th></tr></thead><tbody>' +
     (allSales.slice().reverse().slice(0,15).map(s=>{
       const canEdit = (Date.now() - s.timestamp) / (1000*60*60*24) <= 45;
@@ -2224,7 +2312,6 @@ function modalView(){
   if(state.modal.type==='supplierPayHistory') return supplierPayHistoryModal();
   if(state.modal.type==='customerHistory') return customerHistoryModal();
   if(state.modal.type==='quickCustomer') return quickCustomerModal();
-  if(state.modal.type==='itemDiscount') return itemDiscountModal();
   if(state.modal.type==='receipt') return receiptModal();
   if(state.modal.type==='dayClosing') return dayClosingModal();
   if(state.modal.type==='ebarimtSettings') return ebarimtSettingsModal();
@@ -2235,6 +2322,8 @@ function modalView(){
   if(state.modal.type==='editPurchase') return editPurchaseModal();
   if(state.modal.type==='newCategory') return newCategoryModal();
   if(state.modal.type==='quickNewProduct') return quickNewProductModal();
+  if(state.modal.type==='productMonthly') return productMonthlyModal();
+  if(state.modal.type==='dayDetail') return dayDetailModal();
   return '';
 }
 function newCategoryModal(){
@@ -2384,7 +2473,7 @@ function bulkReviewModal(){
   const rows = state.purchaseReviewRows || [];
   const total = rows.reduce((s,r)=> s + (parseFloat(r.qty)||0)*(parseFloat(r.buyPrice)||0), 0);
   return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:860px;"><h3>Шалгаж, засах</h3>' +
-    '<div class="info-note">Мэдээллээ сайн харж, шаардлагатай бол шууд энд засаарай. "Байгаа" бараанд одоогийн үлдэгдэл, зарах үнэ харагдана (Үлдэгдлийг гараар засаж болно). "Шинэ" бараанд зарах үнээ энд тохируулж болно (хоосон бол автомат 20%-иар тооцно). Бэлэн бол доор "Баталгаажуулах" дарж сагсанд нэмнэ.</div>' +
+    '<div class="info-note">Мэдээллээ сайн харж, шаардлагатай бол шууд энд засаарай. "Байгаа" бараанд одоогийн үлдэгдэл, зарах үнэ харагдана (Үлдэгдлийг гараар засаж болно). "Шинэ" бараанд зарах үнээ энд тохируулж болно (хоосон бол автомат 20%-иар тооцно). Бэлэн бол доор <b>"Шалгаж дуусаад бүртгэх"</b> дарахад шууд бүртгэгдэнэ - дахин тусад нь Бүртгэх товч дарах шаардлагагүй.</div>' +
     '<div class="table-wrap" style="max-height:440px;overflow-y:auto;"><table><thead><tr><th style="min-width:120px;">Нэр</th><th style="width:55px;">Тоо</th><th style="width:80px;">Авсан үнэ</th><th style="width:130px;">Зарах үнэ</th><th style="width:70px;">Үлдэгдэл</th><th style="width:130px;">Баркод</th><th style="width:65px;">Төлөв</th><th style="width:28px;"></th></tr></thead><tbody>' +
     rows.map((r,i)=>{
       const existingProduct = r.productId ? state.products.find(p=>p.id===r.productId) : null;
@@ -2409,7 +2498,7 @@ function bulkReviewModal(){
     }).join('') +
     '</tbody></table></div>' +
     '<div class="ttotal"><span>Нийт дүн</span><span id="bulkReviewTotal">'+mnt(total)+'</span></div>' +
-    '<div class="modal-actions"><button type="button" class="btn btn-accent" id="bulkReviewConfirmBtn">Баталгаажуулж сагсанд нэмэх ('+rows.length+')</button><button type="button" class="btn btn-ghost" id="bulkReviewBackBtn">Буцах</button></div>' +
+    '<div class="modal-actions"><button type="button" class="btn btn-accent" id="bulkReviewConfirmBtn">\u2714 Шалгаж дуусаад бүртгэх ('+rows.length+')</button><button type="button" class="btn btn-ghost" id="bulkReviewBackBtn">Буцах</button></div>' +
     '</div></div>';
 }
 async function saveQuickNewProduct(form){
@@ -2600,9 +2689,15 @@ function supplierPayHistoryModal(){
   const s = state.suppliers.find(x=>x.id===d.supplierId);
   const hist = (s && s.paymentHistory) ? s.paymentHistory.slice().sort((a,b)=>b.timestamp-a.timestamp) : [];
   const totalPaid = hist.reduce((sum,h)=>sum+h.amount,0);
-  return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>'+esc(s?s.name:'')+' - Төлбөрийн түүх</h3>' +
-    '<div class="muted" style="margin-bottom:10px;">Нийт төлсөн (бүх цаг): <b>'+mnt(totalPaid)+'</b></div>' +
-    '<div class="table-wrap" style="max-height:320px;overflow-y:auto;"><table><thead><tr><th>Огноо</th><th style="text-align:right">Төлсөн дүн</th></tr></thead><tbody>' +
+  const purchases = state.purchases.filter(pu=>pu.supplierId===d.supplierId).slice().sort((a,b)=>b.timestamp-a.timestamp);
+  const totalPurchased = purchases.reduce((sum,pu)=>sum+(pu.total||0),0);
+  return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:560px;"><h3>'+esc(s?s.name:'')+' - Түүх</h3>' +
+    '<h4 style="margin:8px 0 6px;">Худалдан авалтын түүх (нийт '+mnt(totalPurchased)+')</h4>' +
+    '<div class="table-wrap" style="max-height:240px;overflow-y:auto;"><table><thead><tr><th>Огноо</th><th>Бараа</th><th style="text-align:right">Дүн</th></tr></thead><tbody>' +
+    (purchases.length ? purchases.map(pu=>'<tr><td class="muted" style="white-space:nowrap;">'+fmtDate(pu.timestamp)+'</td><td class="muted">'+esc((pu.items||[]).map(it=>it.name+' x'+it.qty).join(', '))+'</td><td class="num">'+mnt(pu.total)+'</td></tr>').join('') : '<tr><td colspan="3" class="muted" style="padding:16px 0;">Худалдан авалтын түүх алга байна</td></tr>') +
+    '</tbody></table></div>' +
+    '<h4 style="margin:16px 0 6px;">Төлбөрийн түүх (нийт '+mnt(totalPaid)+')</h4>' +
+    '<div class="table-wrap" style="max-height:200px;overflow-y:auto;"><table><thead><tr><th>Огноо</th><th style="text-align:right">Төлсөн дүн</th></tr></thead><tbody>' +
     (hist.length ? hist.map(h=>'<tr><td class="muted">'+fmtDate(h.timestamp)+'</td><td class="num">'+mnt(h.amount)+'</td></tr>').join('') : '<tr><td colspan="2" class="muted" style="padding:16px 0;">Төлбөрийн түүх алга байна</td></tr>') +
     '</tbody></table></div>' +
     '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div></div></div>';
@@ -2626,19 +2721,6 @@ function customerHistoryModal(){
     '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div></div></div>';
 }
 
-function itemDiscountModal(){
-  const d = state.modal.data;
-  const c = state.cart.find(x=>x.productId===d.productId);
-  if(!c){ return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>Бараа олдсонгүй</h3><div class="modal-actions"><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div></div></div>'; }
-  const eff = cartItemEffectivePrice(c);
-  return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>Хөнгөлөлт - '+esc(c.name)+'</h3>' +
-    '<div class="muted" style="margin-bottom:10px;">Жинхэнэ үнэ: '+mnt(c.price)+' / ширхэг</div>' +
-    '<form id="itemDiscountForm"><div class="form-grid">' +
-    '<div class="full"><label>Хөнгөлөлт (хувь, %)</label><input name="discountPct" type="number" min="0" max="100" step="1" value="'+(c.discountPct||0)+'" autofocus /></div>' +
-    '</div>' +
-    '<div class="muted" id="discountPreview" style="margin:8px 0;font-size:13px;">Хөнгөлсний дараах үнэ: <b>'+mnt(eff)+'</b> / ширхэг</div>' +
-    '<div class="modal-actions"><button type="submit" class="btn btn-accent">Хадгалах</button>'+(c.discountPct>0?'<button type="button" class="btn btn-warm" id="removeDiscountBtn">Хөнгөлөлт арилгах</button>':'')+'<button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></form></div></div>';
-}
 function quickCustomerModal(){
   return '<div class="modal-bg" id="modalBg"><div class="modal"><h3>Шинэ харилцагч (шуурхай)</h3>' +
     '<form id="quickCustomerForm"><div class="form-grid">' +
@@ -2707,39 +2789,23 @@ function attachHandlers(){
   document.querySelectorAll('[data-qtyplus]').forEach(el=> el.onclick = ()=> changeCartQty(el.dataset.qtyplus, 1));
   document.querySelectorAll('[data-qtyminus]').forEach(el=> el.onclick = ()=> changeCartQty(el.dataset.qtyminus, -1));
   document.querySelectorAll('[data-rmcart]').forEach(el=> el.onclick = ()=> removeFromCart(el.dataset.rmcart));
+  // Хөнгөлөлтийн товч: цонх нээхгүй, ЗӨВХӨН 2%-ийг шууд асааж/унтраана
   document.querySelectorAll('[data-discountitem]').forEach(el=>{
-    el.onclick = ()=>{ state.modal = { type:'itemDiscount', data:{ productId: el.dataset.discountitem } }; render(); };
-  });
-  const itemDiscountForm = document.getElementById('itemDiscountForm');
-  if(itemDiscountForm) itemDiscountForm.onsubmit = (e)=>{
-    e.preventDefault();
-    const pct = Math.max(0, Math.min(100, parseFloat(itemDiscountForm.discountPct.value)||0));
-    const c = state.cart.find(x=>x.productId===state.modal.data.productId);
-    if(c){ c.discountPct = pct>0 ? pct : undefined; }
-    state.modal = null;
-    flash(pct>0 ? 'Хөнгөлөлт хадгалагдлаа: -'+pct+'%' : 'Хөнгөлөлт арилгагдлаа', 'accent');
-    render();
-  };
-  const removeDiscountBtn = document.getElementById('removeDiscountBtn');
-  if(removeDiscountBtn) removeDiscountBtn.onclick = ()=>{
-    const c = state.cart.find(x=>x.productId===state.modal.data.productId);
-    if(c){ delete c.discountPct; }
-    state.modal = null;
-    flash('Хөнгөлөлт арилгагдлаа', 'accent');
-    render();
-  };
-  const discountPctInput = document.querySelector('#itemDiscountForm [name="discountPct"]');
-  if(discountPctInput){
-    discountPctInput.oninput = ()=>{
-      const c = state.cart.find(x=>x.productId===state.modal.data.productId);
-      const previewEl = document.getElementById('discountPreview');
-      if(c && previewEl){
-        const pct = Math.max(0, Math.min(100, parseFloat(discountPctInput.value)||0));
-        const eff = c.price*(1-pct/100);
-        previewEl.innerHTML = 'Хөнгөлсний дараах үнэ: <b>'+mnt(eff)+'</b> / ширхэг';
-      }
+    el.onclick = ()=>{
+      const c = state.cart.find(x=>x.productId===el.dataset.discountitem);
+      if(!c) return;
+      if(c.discountPct===2){ delete c.discountPct; flash('2% хөнгөлөлт арилгагдлаа', 'accent'); }
+      else { c.discountPct = 2; flash('2% хөнгөлөлт хэрэгжлээ', 'accent'); }
+      render();
     };
-  }
+  });
+  const discountAllBtn = document.getElementById('discountAllBtn');
+  if(discountAllBtn) discountAllBtn.onclick = ()=>{
+    const allOn = state.cart.every(c=>c.discountPct===2);
+    if(allOn){ state.cart.forEach(c=>{ delete c.discountPct; }); flash('Бүх барааны хөнгөлөлт арилгагдлаа', 'accent'); }
+    else { state.cart.forEach(c=>{ c.discountPct = 2; }); flash('Бүх бараанд 2% хөнгөлөлт хэрэгжлээ', 'accent'); }
+    render();
+  };
   document.querySelectorAll('[data-paytype]').forEach(el=> el.onclick = ()=>{ state.cartPayType = el.dataset.paytype; render(); });
   const cartCustomerSel = document.getElementById('cartCustomerSel');
   if(cartCustomerSel) cartCustomerSel.onchange = ()=>{ state.cartCustomerId = cartCustomerSel.value; };
@@ -3130,12 +3196,12 @@ function attachHandlers(){
     };
   });
   const bulkReviewConfirmBtn = document.getElementById('bulkReviewConfirmBtn');
-  if(bulkReviewConfirmBtn) bulkReviewConfirmBtn.onclick = ()=>{
+  if(bulkReviewConfirmBtn) bulkReviewConfirmBtn.onclick = async ()=>{
     const rows = state.purchaseReviewRows;
     if(!rows || rows.length===0){ flash('Мөр алга байна', 'warm'); return; }
+    if(!state.purchaseSupplierId){ flash('Нийлүүлэгч сонгоно уу - өмнөх цонхонд (Буцах дараад) сонгоод дахин орно уу', 'warm'); return; }
     // Гараар засварласан Үлдэгдэл (stockOverride) байвал тухайн барааны одоогийн
-    // үлдэгдлийг шууд тэр тоогоор нь засна (энэ бол зөвхөн засвар - худалдан авалтын
-    // тоо хэмжээ дараа нь "Бүртгэх" дарахад үүн дээр нэмэгдэнэ гэдгийг анхаарна уу).
+    // үлдэгдлийг шууд тэр тоогоор нь засна (энэ бол зөвхөн засвар).
     let stockFixCount = 0;
     rows.forEach(r=>{
       if(r.productId && r.stockOverride!=null){
@@ -3145,10 +3211,13 @@ function attachHandlers(){
     });
     bulkAddRowsToPurchaseCart(rows);
     state.purchaseReviewRows = null;
-    state.purchaseTableRows = [{rowId:uid()},{rowId:uid()},{rowId:uid()}];
     state.modal = { type:'purchaseEntry' };
-    flash(rows.length+' бараа сагсанд нэмэгдлээ'+(stockFixCount?' ('+stockFixCount+' үлдэгдэл засагдлаа)':'')+' - доор "Бүртгэх" дарна уу', 'accent');
     render();
+    // ГОЛ ӨӨРЧЛӨЛТ: "Шалгаж дуусаад" энд ШУУД бүртгэнэ - өмнөх шигээ дахин "Бүртгэх" гэсэн
+    // тусад нь товч дарах шаардлагагүй. Ингэснээр шалгаж дуусаад л шууд бүртгэгдэнэ,
+    // дунд зэргийн "зөвхөн дүн харагдах" тодорхойгүй үе шат үгүй болно.
+    if(stockFixCount) flash(stockFixCount+' үлдэгдэл засагдлаа', 'accent');
+    await submitPurchase();
   };
   const bulkReviewBackBtn = document.getElementById('bulkReviewBackBtn');
   if(bulkReviewBackBtn) bulkReviewBackBtn.onclick = ()=>{ state.modal = { type:'purchaseEntry' }; render(); };
@@ -3172,6 +3241,9 @@ function attachHandlers(){
   }
   if(purchaseProductNameGoBtn) purchaseProductNameGoBtn.onclick = submitPurchaseProductName;
   if(purchaseProductNameInput) purchaseProductNameInput.onkeydown = (e)=>{ if(e.key==='Enter'){ e.preventDefault(); submitPurchaseProductName(); } };
+  document.querySelectorAll('[data-purqty]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.cartItemId===el.dataset.purqty); if(c){ c.qty = Math.max(1, parseFloat(el.value)||1); render(); } }; });
+  document.querySelectorAll('[data-purprice]').forEach(el=>{ el.onchange = ()=>{ const c = state.purchaseCart.find(x=>x.cartItemId===el.dataset.purprice); if(c){ c.price = Math.max(0, parseFloat(el.value)||0); render(); } }; });
+  document.querySelectorAll('[data-rmpurcart]').forEach(el=> el.onclick = ()=> removeFromPurchaseCart(el.dataset.rmpurcart));
   const submitPurchaseBtn = document.getElementById('submitPurchaseBtn');
   if(submitPurchaseBtn) submitPurchaseBtn.onclick = submitPurchase;
 
@@ -3200,6 +3272,8 @@ function attachHandlers(){
   document.querySelectorAll('[data-delsupplier]').forEach(el=>{ el.onclick = ()=> deleteSupplier(el.dataset.delsupplier); });
   document.querySelectorAll('[data-suppay]').forEach(el=>{ el.onclick = ()=>{ const s = state.suppliers.find(x=>x.id===el.dataset.suppay); state.modal = {type:'payAmount', data:{kind:'supplier', id:s.id, name:s.name, currentDebt:s.debt||0}}; render(); }; });
   document.querySelectorAll('[data-supphist]').forEach(el=>{ el.onclick = ()=>{ state.modal = {type:'supplierPayHistory', data:{supplierId:el.dataset.supphist}}; render(); }; });
+  document.querySelectorAll('[data-productmonthly]').forEach(el=>{ el.onclick = ()=>{ state.modal = {type:'productMonthly', data:{productName:el.dataset.productmonthly}}; render(); }; });
+  document.querySelectorAll('[data-daydetail]').forEach(el=>{ el.onclick = ()=>{ state.modal = {type:'dayDetail', data:{dateStr:el.dataset.daydetail}}; render(); }; });
 
   const addCustomerBtn = document.getElementById('addCustomerBtn');
   if(addCustomerBtn) addCustomerBtn.onclick = ()=> openCustomerModal(null);
