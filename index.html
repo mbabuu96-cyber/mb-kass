@@ -14,6 +14,7 @@
 <link rel="apple-touch-icon" href="./icon-192.png">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
   :root{
     --bg:#F3F6F4; --panel:#FFFFFF; --ink:#152420; --ink-soft:#5B6B64; --line:#DCE4E0;
@@ -356,57 +357,89 @@ function ebarimtReady(){
   return !!(s && s.enabled && s.apiUrl && s.merchantTin && s.posNo && s.districtCode);
 }
 // Барааны НӨАТ/НХАТ задаргаа: үнэ бүх татвар ШИНГЭСЭН гэж үзнэ.
-// Энгийн бараа: үнэ = суурь + 10% НӨАТ  -> НӨАТ = дүн * 10 / 110
-// НХАТ-тай (архи, тамхи): үнэ = суурь + 10% НӨАТ + t% НХАТ -> хуваарь = 110 + t
-function calcItemTaxes(amount, hasCityTax){
+// VAT_ABLE: үнэ = суурь + 10% НӨАТ (+ t% НХАТ бол хуваарь 110+t)
+// VAT_FREE / VAT_ZERO / NOT_VAT: НӨАТ = 0 (НХАТ-тай бол дүн * t / (100+t))
+function calcItemTaxes(amount, hasCityTax, vatType){
+  const vt = vatType || 'VAT_ABLE';
   const ct = hasCityTax ? (parseFloat(state.ebarimtSettings.cityTaxPercent)||2) : 0;
+  if(vt !== 'VAT_ABLE'){
+    const cityTax = ct ? Math.round(amount * ct / (100 + ct) * 100) / 100 : 0;
+    return { vat: 0, cityTax };
+  }
   const divisor = 110 + ct;
   const vat = Math.round(amount * 10 / divisor * 100) / 100;
   const cityTax = ct ? Math.round(amount * ct / divisor * 100) / 100 : 0;
   return { vat, cityTax };
 }
-// PosAPI 3.0-ын POST /rest/receipt бүтцээр борлуулалтын payload бэлтгэнэ
+// PosAPI 3.0-ын POST /rest/receipt-ийн албан ёсны бүтцээр payload бэлтгэнэ.
+// ХСН-д тавигдах шаардлагын дагуу:
+// - НӨАТ тооцох/чөлөөлөгдөх/0% барааг хамт зарсан бол ТАТВАРЫН ТӨРӨЛ ТУС БҮРЭЭР дэд баримт үүсгэнэ
+// - Худалдан авагч ААН/бизнес эрхлэгч бол (11 буюу 14 оронтой ТТД өгөгдсөн) B2B_RECEIPT болгож,
+//   customerTin дамжуулна - B2B-д сугалаа олгогдохгүй тул үүнийг тусад нь тэмдэглэнэ
+// - Иргэн өөрийн 8 оронтой ebarimt дугаараа өгсөн бол consumerNo болгож дамжуулна
 function buildEbarimtPayload(sale){
   const s = state.ebarimtSettings;
-  let totalVat = 0, totalCityTax = 0;
-  const items = (sale.items||[]).map(it=>{
+  const rawCode = (sale.ebarimt||'').trim();
+  const isBusinessTin = /^[0-9]{11}$|^[0-9]{14}$/.test(rawCode);
+  const isConsumerNo = /^[0-9]{8}$/.test(rawCode);
+  const customerTin = isBusinessTin ? rawCode : null;
+  const consumerNo = isConsumerNo ? rawCode : '';
+  const saleType = customerTin ? 'B2B_RECEIPT' : 'B2C_RECEIPT';
+  // Барааг НӨАТ-ын төрлөөр нь бүлэглэнэ - тус бүрд нь тусдаа дэд баримт (receipts[]) үүснэ
+  const groups = {}; // vatType -> {items:[], totalAmount, totalVAT, totalCityTax}
+  (sale.items||[]).forEach(it=>{
     const p = state.products.find(x=>x.id===it.productId);
+    const vt = (p && p.vatType) ? p.vatType : 'VAT_ABLE';
     const lineTotal = Math.round(it.price * it.qty * 100) / 100;
-    const taxes = calcItemTaxes(lineTotal, p && p.hasCityTax);
-    totalVat += taxes.vat; totalCityTax += taxes.cityTax;
-    return {
+    const taxes = calcItemTaxes(lineTotal, p && p.hasCityTax, vt);
+    if(!groups[vt]) groups[vt] = { items:[], totalAmount:0, totalVAT:0, totalCityTax:0 };
+    groups[vt].items.push({
       name: it.name,
       barCode: (p && p.barcode) ? p.barcode : sale.id,
       barCodeType: (p && p.barcode && /^[0-9]{8}$|^[0-9]{12,14}$/.test(p.barcode)) ? 'GS1' : 'UNDEFINED',
       classificationCode: (p && p.taxCode) ? p.taxCode : (s.defaultClassificationCode || ''),
+      taxProductCode: null,
       measureUnit: 'ш',
       qty: it.qty,
       unitPrice: it.price,
-      totalAmount: lineTotal,
       totalVAT: taxes.vat,
-      totalCityTax: taxes.cityTax
-    };
+      totalCityTax: taxes.cityTax,
+      totalAmount: lineTotal
+    });
+    groups[vt].totalAmount = Math.round((groups[vt].totalAmount + lineTotal)*100)/100;
+    groups[vt].totalVAT = Math.round((groups[vt].totalVAT + taxes.vat)*100)/100;
+    groups[vt].totalCityTax = Math.round((groups[vt].totalCityTax + taxes.cityTax)*100)/100;
   });
-  totalVat = Math.round(totalVat*100)/100;
-  totalCityTax = Math.round(totalCityTax*100)/100;
+  const receipts = Object.keys(groups).map(vt=>({
+    totalAmount: groups[vt].totalAmount,
+    taxType: vt,
+    merchantTin: s.merchantTin,
+    customerTin: customerTin,
+    totalVAT: groups[vt].totalVAT,
+    totalCityTax: groups[vt].totalCityTax,
+    bankAccountNo: '',
+    iBan: '',
+    items: groups[vt].items
+  }));
+  const totalVat = Math.round(receipts.reduce((sum,r)=>sum+r.totalVAT,0)*100)/100;
+  const totalCityTax = Math.round(receipts.reduce((sum,r)=>sum+r.totalCityTax,0)*100)/100;
   const payMap = { cash:'CASH', qpay:'PAYMENT_CARD', pos:'PAYMENT_CARD', credit:'CASH' };
   return {
+    branchNo: s.branchNo || '001',
     totalAmount: sale.total,
     totalVAT: totalVat,
     totalCityTax: totalCityTax,
     districtCode: s.districtCode,
     merchantTin: s.merchantTin,
-    branchNo: s.branchNo || '001',
     posNo: s.posNo,
-    type: 'B2C_RECEIPT',
-    receipts: [{
-      totalAmount: sale.total,
-      totalVAT: totalVat,
-      totalCityTax: totalCityTax,
-      taxType: 'VAT_ABLE',
-      merchantTin: s.merchantTin,
-      items: items
-    }],
+    customerTin: customerTin,
+    consumerNo: consumerNo,
+    type: saleType,
+    inActiveId: null,
+    invoiceId: null,
+    reportMonth: null,
+    billIdSuffix: null,
+    receipts: receipts,
     payments: (sale.payType==='mixed' && Array.isArray(sale.payments))
       ? sale.payments.map(p=>({ code: payMap[p.type]||'CASH', status:'PAID', paidAmount: p.amount }))
       : [{
@@ -424,7 +457,10 @@ async function fetchWithTimeout(url, options, ms){
   finally{ clearTimeout(t); }
 }
 // Нэг борлуулалтын баримтыг PosAPI руу илгээнэ. Амжилттай бол sale дээр
-// ebarimtReceipt {ddtd, lottery, qrData, date} хадгалагдана.
+// ebarimtReceipt {ddtd, lottery, date} хадгалагдана. QR-ийн ТҮҮХИЙ ӨГӨГДЛИЙГ (qrData)
+// АЮУЛГҮЙ БАЙДЛЫН ШААРДЛАГЫН ДАГУУ CLOUD/САНД ХАДГАЛДАГГҮЙ - зөвхөн ТҮР зуур (тухайн
+// browser session доторх санах ойд) хадгалж, тасалбар шууд хэвлэхэд л ашиглана.
+const ebarimtQrCache = {};
 async function sendSaleToEbarimt(saleId, silent){
   const sale = state.sales.find(x=>x.id===saleId);
   if(!sale) return { ok:false, err:'sale not found' };
@@ -442,9 +478,10 @@ async function sendSaleToEbarimt(saleId, silent){
       sale.ebarimtReceipt = {
         ddtd: data.id || data.billId,
         lottery: data.lottery || '',
-        qrData: data.qrData || '',
         date: data.date || new Date().toISOString()
       };
+      // QR-ийг ЗӨВХӨН санах ойд (энэ session-д) хадгална - cloud/sales руу бичихгүй
+      if(data.qrData){ ebarimtQrCache[saleId] = data.qrData; }
       // Автомат илгээгдсэн бол дарааллаас хасна
       state.ebarimtQueue = state.ebarimtQueue.filter(id=>id!==saleId);
       await saveKeyMerged('pos:sales', state.sales);
@@ -493,6 +530,30 @@ async function testEbarimtConnection(){
   }catch(e){
     flash('PosAPI-д холбогдож чадсангүй. Сервис асаалттай, хаяг зөв эсэхийг шалгана уу ('+s.apiUrl+')', 'warm');
   }
+}
+// ХСН-д тавигдах шаардлага: "getInformation" функцийг байнга шалгаж, сугалааны дугаар
+// дуусах дөхөж буй болон 3 өдрийн илгээх хугацаа хэтэрч буйг анхааруулна. Апп нээгдэх
+// бүрд чимээгүй (silent) шалгаж, зөвхөн асуудал байвал л мэдэгдэнэ.
+async function checkEbarimtInfoAndWarn(){
+  if(!ebarimtReady()) return;
+  try{
+    const res = await fetchWithTimeout(state.ebarimtSettings.apiUrl.replace(/\/$/,'') + '/rest/info', { method:'GET' }, 4000);
+    if(!res.ok) return;
+    const data = await res.json().catch(()=>null);
+    if(!data) return;
+    // Баталгаажсан талбарын нэрс (техпартнерсийн нээлттэй Go SDK-ын InfoResponse-оос):
+    // leftLotteries (int, "Нийт үлдсэн сугалаа"), lastSendDate (огнооны string, "Сүүлийн байдлаар илгээсэн огноо")
+    const remaining = data.leftLotteries;
+    if(remaining!=null && remaining < 100){
+      flash('\u26A0 Ебаримтын сугалааны дугаар дуусаж байна (үлдсэн: '+remaining+') - Оператор/PosAPI-гаасаа шинэ багц авна уу', 'warm');
+    }
+    if(data.lastSendDate){
+      const daysAgo = Math.floor((Date.now() - new Date(data.lastSendDate).getTime()) / (24*60*60*1000));
+      if(daysAgo >= 2){
+        flash('\u26A0 Борлуулалтын мэдээ '+daysAgo+' өдрийн өмнө сүүлд илгээгдсэн - хуулиар 3 хоногт багтаан илгээх ёстой тул "Ебаримт" тохиргооноос гараар илгээнэ үү', 'warm');
+      }
+    }
+  }catch(e){ /* сүлжээгүй/PosAPI унтарсан үед чимээгүй алгасна */ }
 }
 async function saveEbarimtSettings(form){
   const s = state.ebarimtSettings;
@@ -644,7 +705,7 @@ let state = {
   products: [], suppliers: [], customers: [], sales: [], purchases: [], returns: [], spoilage: [], expenses: [], qpayQr: null,
   role: null, adminPin: null, closings: [], lastBackupTs: 0,
   ebarimtSettings: null, ebarimtQueue: [],
-  cart: [], cartCustomerId:'', cartPayType:'cash', cartEbarimt:'', kassCategoryFilter:null,
+  cart: [], cartCustomerId:'', cartPayType:'cash', cartEbarimt:'', kassCategoryFilter:null, kassSearch:'',
   cartDateOverride:false, cartDateValue:'',
   cartCashReceived:'', cartSplitCash:'', cartSplitQpay:'', cartSplitPos:'',
   purchaseCart: [], purchaseSupplierId:'', purchasePayType:'credit', purchaseDateOverride:false, purchaseDateValue:'',
@@ -735,6 +796,7 @@ async function initData(){
         if(state.ebarimtQueue.length===0){ flash('Дараалалд байсан бүх Ебаримт амжилттай илгээгдлээ', 'accent'); }
       });
     }
+    checkEbarimtInfoAndWarn();
   }, 800);
 }
 function setTab(t){ state.tab=t; state.search=''; render(); }
@@ -847,6 +909,25 @@ function isValidNumericBarcodeChecksum(code){
 }
 async function handleScanSubmit(code){
   if(!code) return;
+  const trimmed = code.trim();
+  // Цэвэр тоо биш (баркод биш, нэр бичсэн) бол НЭРЭЭР хайна - checksum/гарын хэлний
+  // шалгалт зөвхөн бодит баркодод хамаарна.
+  if(!/^[0-9]+$/.test(trimmed)){
+    const q = trimmed.toLowerCase();
+    const matches = state.products.filter(p=>(p.stock||0)>0 && p.name.toLowerCase().includes(q));
+    const input = document.getElementById('scanInput');
+    if(matches.length===1){
+      addToCart(matches[0].id);
+      state.kassSearch='';
+      if(input){ input.value=''; input.focus(); }
+      render();
+    } else if(matches.length>1){
+      flash(matches.length+' бараа таарч байна - доорх жагсаалтаас сонгоно уу', 'accent');
+    } else {
+      flash('Ийм нэртэй бараа олдсонгүй: ' + trimmed, 'warm');
+    }
+    return;
+  }
   if(looksLikeLayoutMismatch(code)){
     flash('Гарын хэл буруу байна! Windows дээрээ Alt+Shift дараад "ENG" болгоод дахин скан хийнэ үү', 'warm');
     const input = document.getElementById('scanInput');
@@ -860,7 +941,7 @@ async function handleScanSubmit(code){
     return;
   }
   const p = findByBarcode(code);
-  if(p){ addToCart(p.id); } else { flash('Баркод олдсонгүй: ' + code, 'warm'); }
+  if(p){ addToCart(p.id); state.kassSearch=''; } else { flash('Баркод олдсонгүй: ' + code, 'warm'); }
   const input = document.getElementById('scanInput');
   if(input){ input.value=''; input.focus(); }
 }
@@ -989,6 +1070,7 @@ async function saveProduct(form){
   d.minStock = Math.max(0, parseFloat(form.minStock.value)||5);
   d.expiryDate = (form.expiryDate && form.expiryDate.value) ? form.expiryDate.value : null;
   d.taxCode = (form.taxCode && form.taxCode.value.trim()) ? form.taxCode.value.trim() : null;
+  d.vatType = (form.vatType && form.vatType.value) ? form.vatType.value : 'VAT_ABLE';
   d.hasCityTax = !!(form.hasCityTax && form.hasCityTax.checked);
   d.supplierId = (form.supplierId && form.supplierId.value) ? form.supplierId.value : (d.supplierId||'');
   if(!d.name){ flash('Барааны нэрийг оруулна уу', 'warm'); return; }
@@ -1243,8 +1325,18 @@ async function handlePurchaseScanSubmit(code){
   }
   const p = findByBarcode(code);
   if(p){
-    // олдсон бараа - шинэчлэх/харах цонх нээгдэнэ (одоогийн үлдэгдлийг мэдээлэл болгож харуулна)
-    state.modal = { type:'quickNewProduct', data:{ productId:p.id, barcode:p.barcode||'', name:p.name, category:p.category||'', buyPrice:p.buyPrice||0, manualSellPrice:p.manualSellPrice, currentStock:p.stock||0, supplierId: state.purchaseSupplierId||p.supplierId||'' } };
+    // ХУРДНЫ ГОЛ ЗАСВАР: өмнө нь БҮРТГЭЛТЭЙ бараа скан хийх БҮРД цонх нээгдэж, тоо/үнэ
+    // баталгаажуулж, товч дардаг байсан тул USB уншигчаар дараалан хурдан уншуулах
+    // боломжгүй болгодог байв. Одоо шинэ бараа шиг л ЦОНХГҮЙ шууд сагсанд нэмэгдэж,
+    // давхар сканнахад л тоо нэмэгдэнэ - хэдэн ч бараа зогсолтгүй уншуулж болно.
+    const existingCartItem = state.purchaseCart.find(c=>c.productId===p.id);
+    if(existingCartItem){
+      existingCartItem.qty += 1;
+      flash('Тоо нэмэгдлээ: ' + p.name + ' (' + existingCartItem.qty + ')', 'accent');
+    } else {
+      state.purchaseCart.push({ cartItemId: uid(), productId: p.id, name: p.name, price: p.buyPrice||0, qty: 1 });
+      flash('\u2714 ' + p.name + ' сагсанд нэмэгдлээ (үнэ: '+mnt(p.buyPrice||0)+' - шаардлагатай бол дараа засна)', 'accent');
+    }
     render();
   } else {
     // Хараахан бааз руу бичигдээгүй ч, сагсанд аль хэдийн "pending" байдлаар орсон эсэхийг шалгана (давхар цонх нээхгүй, шууд тоог нэмнэ)
@@ -1357,11 +1449,13 @@ function startCameraScanner(){
     html5QrcodeInstance.start(
       { facingMode: 'environment' },
       {
-        fps: 15,
+        fps: 24,
         qrbox: function(viewfinderWidth, viewfinderHeight){
-          // Уншuulах хүрээг дэлгэцийн хэмжээнд тааруулж томоор гаргана - жижиг хүрээ удаан уншдаг
-          const w = Math.floor(viewfinderWidth * 0.9);
-          const h = Math.floor(Math.min(viewfinderHeight * 0.45, w * 0.6));
+          // Уншuulах хүрээг дэлгэцийн хэмжээнд тааруулж ЭЛЭГ ТОМООР гаргана - жижиг хүрээ
+          // удаан уншдаг. Таблет/том дэлгэцэн дээр хайрцаг харьцангуй жижиг мэдрэгддэг тул
+          // өндрийн хязгаарыг өсгөв (0.6x -> 0.75x).
+          const w = Math.floor(viewfinderWidth * 0.92);
+          const h = Math.floor(Math.min(viewfinderHeight * 0.55, w * 0.75));
           return { width: w, height: h };
         },
         // Өндөр нягтралтай дүрс авах тусам жижиг/бүдэг/холын баркодыг хурдан танина
@@ -1436,7 +1530,11 @@ function startCameraScanner(){
         const adv = [];
         if(caps && caps.zoom && caps.zoom.max){
           cameraZoomCaps = caps.zoom;
-          adv.push({ zoom: Math.min(caps.zoom.max, Math.max(caps.zoom.min||1, 2)) });
+          // ХУРДНЫ ЗАСВАР: өмнө нь тогтмол 2x ашигладаг байсан. Одоо төхөөрөмжийн бодит
+          // дэмждэг хамгийн их зумын 30%-ийг л/эсвэл 2x-ийн аль ИХ утгыг сонгож, илүү
+          // ойртуулж эхэлдэг болгосон - таблет дээр хол зайнаас баркод унших хурдассан.
+          const smartZoom = Math.max(2, Math.round(caps.zoom.max * 0.3 * 10)/10);
+          adv.push({ zoom: Math.min(caps.zoom.max, Math.max(caps.zoom.min||1, smartZoom)) });
         } else { cameraZoomCaps = null; }
         if(caps && caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('continuous')>-1){
           adv.push({ focusMode: 'continuous' });
@@ -1593,11 +1691,34 @@ async function saveExpense(form){
 }
 // Борлуулалт устгах: үлдэгдэл буцаж нэмэгдэж, зээл бол харилцагчийн өр хасагдаж,
 // өрхийн хэрэглээ бол холбогдсон Зарлагын мөр мөн устгагдана.
+// Аль хэдийн PosAPI-д илгээгдсэн баримтыг ХҮЧИНГҮЙ болгоно ("Баримт буцаах" шаардлага).
+// Баталгаажсан бүтэц (техпартнерсийн нээлттэй Go SDK-аас): DELETE /rest/receipt,
+// body: { id: "<ДДТД>", date: "<баримт үүссэн огноо, yyyy-MM-dd HH:mm:ss>" }
+async function voidEbarimtReceipt(ddtd, issuedDate){
+  if(!ebarimtReady() || !ddtd) return { ok:false, err:'not configured' };
+  try{
+    const dateStr = issuedDate ? new Date(issuedDate).toISOString().slice(0,19).replace('T',' ') : new Date().toISOString().slice(0,19).replace('T',' ');
+    const res = await fetchWithTimeout(
+      state.ebarimtSettings.apiUrl.replace(/\/$/,'') + '/rest/receipt',
+      { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: ddtd, date: dateStr }) },
+      6000
+    );
+    if(res.ok) return { ok:true };
+    return { ok:false, err: 'HTTP '+res.status };
+  }catch(e){
+    return { ok:false, err: (e && e.name==='AbortError') ? 'Хугацаа хэтэрлээ' : 'Холбогдож чадсангүй' };
+  }
+}
 async function deleteSale(id){
   const s = state.sales.find(x=>x.id===id);
   if(!s) return;
   const desc = (s.items||[]).map(it=>it.name+' x'+it.qty).join(', ');
-  if(!confirm('Энэ борлуулалтыг устгах уу?\n\n'+fmtDate(s.timestamp)+'\n'+desc+'\nДүн: '+mnt(s.total)+'\n\nҮлдэгдэл буцаж нэмэгдэнэ'+(s.payType==='credit'?', харилцагчийн өр хасагдана':'')+'.')) return;
+  const hasEbarimt = s.ebarimtReceipt && s.ebarimtReceipt.ddtd;
+  if(!confirm('Энэ борлуулалтыг устгах уу?\n\n'+fmtDate(s.timestamp)+'\n'+desc+'\nДүн: '+mnt(s.total)+'\n\nҮлдэгдэл буцаж нэмэгдэнэ'+(s.payType==='credit'?', харилцагчийн өр хасагдана':'')+(hasEbarimt?'\n\nЭнэ борлуулалтад Ебаримт үүсчихсэн байгаа тул PosAPI-д мөн хүчингүй болгох хүсэлт илгээгдэнэ.':'')+'.')) return;
+  if(hasEbarimt){
+    const vr = await voidEbarimtReceipt(s.ebarimtReceipt.ddtd, s.ebarimtReceipt.date);
+    if(!vr.ok){ flash('\u26A0 Ебаримтыг PosAPI дээр хүчингүй болгож чадсангүй ('+vr.err+') - гараар PosAPI/Оператор системээс буцаана уу', 'warm'); }
+  }
   (s.items||[]).forEach(it=>{
     const p = state.products.find(x=>x.id===it.productId);
     if(p) p.stock = (p.stock||0) + it.qty;
@@ -1622,21 +1743,36 @@ function receiptModal(){
   const s = state.sales.find(x=>x.id===state.modal.data.saleId);
   if(!s) return '';
   const cust = s.customerId ? state.customers.find(c=>c.id===s.customerId) : null;
+  const es = state.ebarimtSettings;
+  // Тасалбарын хөл дүнд НӨАТ/НХАТ-ийг тусад нь хэвлэх шаардлагатай тул борлуулалтаас дахин тооцоолно
+  let vatTotal = 0, cityTaxTotal = 0;
+  if(s.ebarimtReceipt){
+    (s.items||[]).forEach(it=>{
+      const p = state.products.find(x=>x.id===it.productId);
+      const vt = (p && p.vatType) ? p.vatType : 'VAT_ABLE';
+      const taxes = calcItemTaxes(it.price*it.qty, p && p.hasCityTax, vt);
+      vatTotal += taxes.vat; cityTaxTotal += taxes.cityTax;
+    });
+  }
+  const qrData = s.ebarimtReceipt ? ebarimtQrCache[s.id] : null; // зөвхөн ТҮР санах ойд байвал
   return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:340px;">' +
     '<div id="receiptPrintArea" style="font-family:var(--mono);font-size:13px;">' +
     '<div style="text-align:center;font-weight:700;font-size:15px;">ДЭЛГҮҮРИЙН КАСС</div>' +
+    (s.ebarimtReceipt && es.merchantTin ? '<div style="text-align:center;font-size:11px;" class="muted">ТТД: '+esc(es.merchantTin)+'</div>' : '') +
     '<div style="text-align:center;" class="muted">'+fmtDate(s.timestamp)+'</div>' +
     '<hr style="border:none;border-top:1px dashed var(--ink-soft);" />' +
     (s.items||[]).map(it=>'<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>'+esc(it.name)+' x'+it.qty+'</span><span>'+mnt(it.price*it.qty)+'</span></div>').join('') +
     '<hr style="border:none;border-top:1px dashed var(--ink-soft);" />' +
-    '<div style="display:flex;justify-content:space-between;font-weight:700;font-size:15px;"><span>НИЙТ</span><span>'+mnt(s.total)+'</span></div>' +
+    '<div style="display:flex;justify-content:space-between;font-weight:700;font-size:15px;"><span>НИЙТ (НӨАТ шингэсэн)</span><span>'+mnt(s.total)+'</span></div>' +
+    (s.ebarimtReceipt && vatTotal>0 ? '<div style="display:flex;justify-content:space-between;font-size:11px;"><span>\u0410\u04E9\u0440 НӨАТ 10%</span><span>'+mnt(vatTotal)+'</span></div>' : '') +
+    (s.ebarimtReceipt && cityTaxTotal>0 ? '<div style="display:flex;justify-content:space-between;font-size:11px;"><span>\u0410\u04E9\u0440 НХАТ</span><span>'+mnt(cityTaxTotal)+'</span></div>' : '') +
     '<div style="display:flex;justify-content:space-between;"><span>Төлбөр:</span><span>'+payTypeLabel(s.payType)+'</span></div>' +
     (s.payType==='mixed' && Array.isArray(s.payments) ? s.payments.map(p=>'<div style="display:flex;justify-content:space-between;font-size:12px;"><span>&nbsp;&nbsp;'+payTypeLabel(p.type)+'</span><span>'+mnt(p.amount)+'</span></div>').join('') : '') +
     (s.cashReceived!=null?'<div style="display:flex;justify-content:space-between;"><span>Авсан:</span><span>'+mnt(s.cashReceived)+'</span></div>':'') +
     (s.changeGiven!=null?'<div style="display:flex;justify-content:space-between;font-weight:700;"><span>Хариулт:</span><span>'+mnt(s.changeGiven)+'</span></div>':'') +
     (cust?'<div style="display:flex;justify-content:space-between;"><span>Харилцагч:</span><span>'+esc(cust.name)+'</span></div>':'') +
-    (s.ebarimt?'<div style="display:flex;justify-content:space-between;"><span>Ебаримт:</span><span>'+esc(s.ebarimt)+'</span></div>':'') +
-    (s.ebarimtReceipt?'<hr style="border:none;border-top:1px dashed var(--ink-soft);" /><div style="display:flex;justify-content:space-between;"><span>ДДТД:</span><span style="font-size:11px;">'+esc(s.ebarimtReceipt.ddtd)+'</span></div>'+(s.ebarimtReceipt.lottery?'<div style="display:flex;justify-content:space-between;font-weight:700;"><span>Сугалаа:</span><span>'+esc(s.ebarimtReceipt.lottery)+'</span></div>':''):'') +
+    (s.ebarimt && !s.ebarimtReceipt?'<div style="display:flex;justify-content:space-between;"><span>Ебаримт:</span><span>'+esc(s.ebarimt)+'</span></div>':'') +
+    (s.ebarimtReceipt?'<hr style="border:none;border-top:1px dashed var(--ink-soft);" /><div style="display:flex;justify-content:space-between;"><span>ДДТД:</span><span style="font-size:11px;">'+esc(s.ebarimtReceipt.ddtd)+'</span></div>'+(s.ebarimtReceipt.lottery?'<div style="display:flex;justify-content:space-between;font-weight:700;"><span>Сугалаа:</span><span>'+esc(s.ebarimtReceipt.lottery)+'</span></div>':'')+'<div style="text-align:center;margin:8px 0;"><div id="ebarimtQrHolder" style="display:inline-block;"></div>'+(!qrData?'<div class="muted" style="font-size:10px;">(QR зураг зөвхөн шинэ бол л харагдана - хуучин баримтад дахин үүсэхгүй)</div>':'')+'</div>':'') +
     '<div style="text-align:center;margin-top:8px;" class="muted">Баярлалаа!</div>' +
     '</div>' +
     '<div class="modal-actions"><button type="button" class="btn btn-accent" id="printReceiptBtn">\u{1F5A8} Хэвлэх</button><button type="button" class="btn btn-ghost" id="modalCancel">Хаах</button></div></div></div>';
@@ -1889,8 +2025,8 @@ function kassView(){
   }
   let filtered;
   let showingCategories = false;
-  if(state.search){
-    const q = state.search.toLowerCase();
+  if(state.kassSearch){
+    const q = state.kassSearch.toLowerCase();
     filtered = availableProducts.filter(p=> p.name.toLowerCase().includes(q) || (p.barcode||'').toLowerCase().includes(q));
   } else if(!state.kassCategoryFilter){
     showingCategories = true;
@@ -1916,7 +2052,7 @@ function kassView(){
       ) : '<div class="muted" style="padding:20px 0;">Бараа алга. "Орлого" таб дээр эхлээд бараагаа бүртгэнэ үү.</div>') +
       '</div>';
   } else {
-    productAreaHtml = (state.search ? '' : '<div style="margin-bottom:8px;"><span class="rm" id="backToCategoriesLink" style="color:var(--accent);cursor:pointer;text-decoration:underline;">\u2190 Ангилал руу буцах</span></div>') +
+    productAreaHtml = (state.kassSearch ? '' : '<div style="margin-bottom:8px;"><span class="rm" id="backToCategoriesLink" style="color:var(--accent);cursor:pointer;text-decoration:underline;">\u2190 Ангилал руу буцах</span></div>') +
       '<div class="plist">' + (filtered.length ? filtered.map(p=>
         '<div class="pcard '+(isLowStock(p)?'low':'')+'" data-addcart="'+p.id+'"><div class="nm">'+esc(p.name)+'</div><div class="pr">'+mnt(getSellPrice(p))+'</div><div class="st">Үлдэгдэл: '+p.stock+'</div></div>'
       ).join('') : '<div class="muted" style="padding:20px 0;">Энэ ангилалд бараа алга.</div>') + '</div>';
@@ -1969,7 +2105,7 @@ function kassView(){
       : '') +
     (state.cartPayType==='household' ?
       '<div class="info-note">\u{1F4E6} Энэ бол борлуулалт биш - <b>эзэн/ажилтан өөрсдөө хэрэглэхээр</b> авч буй бараа. Мөнгө орж ирэхгүй тул Ебаримт шаардлагагүй. Үлдэгдэл хасагдаж, дараах <b>ӨРТГӨӨР</b> зардал/алдагдал болгож бүртгэгдэнэ: <b>'+mnt(state.cart.reduce((s,c)=>s+(c.buyPrice||0)*c.qty,0))+'</b></div>'
-      : '<input id="ebarimtInput" placeholder="Ебаримтын дугаар (заавал биш)" value="'+esc(state.cartEbarimt)+'" />') +
+      : '<input id="ebarimtInput" placeholder="Иргэний ebarimt код (8 орон) эсвэл ААН-ийн ТТД (11/14 орон)" value="'+esc(state.cartEbarimt)+'" title="8 оронтой бол иргэний сугалаанд бүртгэнэ. 11/14 оронтой бол ААН-ийн ТТД гэж үзэж B2B баримт (сугалаагүй) болгоно." />') +
     '</div>' +
     '<button class="btn btn-accent btn-block" style="margin-top:10px;" id="checkoutBtn" '+(state.cart.length?'':'disabled')+'>Төлбөр тооцох</button></div></div>';
 }
@@ -2022,10 +2158,19 @@ function purchaseEntryModal(){
   const supplierField = '<div class="scan-row" style="margin-bottom:10px;"><select id="purchaseSupplierSel" style="flex:1;"><option value="">- Сонгох -</option>'+supOpts+'</select><button type="button" class="btn btn-blue" id="newSupplierBtn">+ Шинэ</button></div>';
   const rows = state.purchaseTableRows;
   const liveTotal = rows.reduce((s,r)=> s + ((parseFloat(r.qty)||0) * (parseFloat(r.buyPrice)||0)), 0);
+  // Тухайн нийлүүлэгчээс өмнө нь худалдан авалт хийсэн эсэхийг шалгаж, "Дахин ашиглах"
+  // товчийг зөвхөн байгаа тохиолдолд харуулна - ижил бараа дахин дахин бичихээс сэргийлнэ.
+  const lastPurchase = state.purchaseSupplierId
+    ? state.purchases.filter(pu=>pu.supplierId===state.purchaseSupplierId).sort((a,b)=>b.timestamp-a.timestamp)[0]
+    : null;
+  const repeatBtnHtml = lastPurchase ? (
+    '<div style="margin-bottom:12px;"><button type="button" class="btn btn-blue" id="repeatLastPurchaseBtn" style="width:100%;">\u{1F501} Сүүлийн худалдан авалтыг дахин ашиглах ('+fmtDate(lastPurchase.timestamp)+', '+(lastPurchase.items||[]).length+' бараа)</button></div>'
+  ) : '';
   return '<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:680px;"><h3>Нийлүүлэгчээс бараа авах</h3>' +
     '<div class="info-note">Энд бараа нэмэхэд агуулахын үлдэгдэл автоматаар нэмэгдэнэ. Хэрэв "Зээл" сонговол өглөг нэмэгдэнэ, бусад төлбөрийн төрөлд (Бэлэн/Qpay/POS) өглөг үүсэхгүй - шууд төлсөн гэж тооцно.</div>' +
     (state.purchaseDraftTs ? '<div class="info-note" style="border-color:var(--gold);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;"><span>\u{1F4BE} '+fmtDate(state.purchaseDraftTs)+'-нд'+(state.purchaseDraftDevice?' ('+state.purchaseDraftDevice+' дээрээс)':'')+' хадгалагдсан ноорог - бүх төхөөрөмж дээр синк хийгддэг</span><button type="button" class="btn btn-ghost btn-sm" id="clearDraftBtn">Ноорог арилгах</button></div>' : '') +
     '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Нийлүүлэгч</label>' + supplierField +
+    repeatBtnHtml +
     '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-soft);font-weight:600;margin-bottom:10px;cursor:pointer;"><input type="checkbox" id="purchaseDateOverrideChk" '+(state.purchaseDateOverride?'checked':'')+' /> Өөр (өнгөрсөн) огноогоор бүртгэх</label>' +
     (state.purchaseDateOverride ? '<div style="margin-bottom:10px;"><input type="date" id="purchaseDateInput" value="'+esc(state.purchaseDateValue||'')+'" max="'+new Date().toISOString().slice(0,10)+'" /></div>' : '') +
     '<label style="font-size:12px;color:var(--ink-soft);font-weight:600;">Төлбөрийн төрөл</label>' +
@@ -2628,6 +2773,7 @@ function productModal(){
     '<div><label>Анхааруулах доод хэмжээ</label><input name="minStock" type="number" step="1" value="'+(d.minStock!=null?d.minStock:5)+'" /></div>' +
     '<div><label>Хугацаа дуусах огноо (заавал биш)</label><input name="expiryDate" type="date" value="'+esc(d.expiryDate||'')+'" /></div>' +
     '<div><label>Татв. ангиллын код (Ебаримт)</label><input name="taxCode" value="'+esc(d.taxCode||'')+'" placeholder="Хоосон бол үндсэн код" /></div>' +
+    '<div><label>НӨАТ-ын төрөл</label><select name="vatType"><option value="VAT_ABLE" '+((d.vatType||'VAT_ABLE')==='VAT_ABLE'?'selected':'')+'>НӨАТ тооцно (10%)</option><option value="VAT_FREE" '+(d.vatType==='VAT_FREE'?'selected':'')+'>НӨАТ-аас чөлөөлөгдсөн</option><option value="VAT_ZERO" '+(d.vatType==='VAT_ZERO'?'selected':'')+'>НӨАТ 0%</option><option value="NOT_VAT" '+(d.vatType==='NOT_VAT'?'selected':'')+'>НӨАТ-гүй</option></select></div>' +
     '<div class="full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" name="hasCityTax" '+(d.hasCityTax?'checked':'')+' /> НХАТ-тай бараа (архи, тамхи)</label></div>' +
     supplierField + '</div>' +
     '<div class="modal-actions"><button type="submit" class="btn btn-accent">Хадгалах</button><button type="button" class="btn btn-ghost" id="modalCancel">Болих</button></div></form></div></div>';
@@ -2777,6 +2923,22 @@ function attachHandlers(){
     // өөрөө гарч ирээд байдаг тул хэрэглэгч гараар товшсон үед л focus орно.
     if(!isMobileDevice()){ setTimeout(()=>{ scanInput.focus(); }, 50); }
     attachLayoutSafeBarcodeInput(scanInput, handleScanSubmit);
+    // НЭРЭЭР ХАЙХ: бичих тутам (бага зэрэг хүлээгээд) доор байгаа барааны жагсаалтыг
+    // шууд шүүнэ - баркод биш, ердийн үг бичихэд ч ажиллана. Баркод скан хийхэд (тоо,
+    // маш хурдан бичигдэнэ) энэ шүүлт саадгүй, learn Enter дарахад хэвийн нэмэгддэг.
+    let kassSearchDebounce;
+    scanInput.oninput = ()=>{
+      clearTimeout(kassSearchDebounce);
+      const val = scanInput.value;
+      // Цэвэр тоо (баркод бичиж/уншиж байгаа) бол шүүлтийг өдөөхгүй - Enter дархад л боловсруулна
+      if(/^[0-9]*$/.test(val.trim())){ if(state.kassSearch){ state.kassSearch=''; render(); scanInput.focus(); scanInput.value=val; } return; }
+      kassSearchDebounce = setTimeout(()=>{
+        state.kassSearch = val;
+        render();
+        const el = document.getElementById('scanInput');
+        if(el){ el.focus(); el.value = val; el.setSelectionRange(val.length, val.length); }
+      }, 150);
+    };
   }
   const scanGoBtn = document.getElementById('scanGoBtn');
   if(scanGoBtn) scanGoBtn.onclick = ()=> handleScanSubmit(document.getElementById('scanInput').value);
@@ -2883,7 +3045,20 @@ function attachHandlers(){
   if(quickAddSupplierLink) quickAddSupplierLink.onclick = ()=> openSupplierModal(null);
 
   const purchaseSupplierSel = document.getElementById('purchaseSupplierSel');
-  if(purchaseSupplierSel) purchaseSupplierSel.onchange = ()=>{ state.purchaseSupplierId = purchaseSupplierSel.value; };
+  if(purchaseSupplierSel) purchaseSupplierSel.onchange = ()=>{ state.purchaseSupplierId = purchaseSupplierSel.value; render(); };
+  const repeatLastPurchaseBtn = document.getElementById('repeatLastPurchaseBtn');
+  if(repeatLastPurchaseBtn) repeatLastPurchaseBtn.onclick = ()=>{
+    const lastPurchase = state.purchases.filter(pu=>pu.supplierId===state.purchaseSupplierId).sort((a,b)=>b.timestamp-a.timestamp)[0];
+    if(!lastPurchase){ flash('Өмнөх худалдан авалт олдсонгүй', 'warm'); return; }
+    // Тоог хоослоно (шинээр оруулах), Авсан үнийг өмнөх удаагийн үнээр бөглөнө -
+    // ихэвчлэн үнэ бага өөрчлөгддөг тул зөв лавлагаа болно, шаардлагатай бол дараа засна.
+    state.purchaseTableRows = lastPurchase.items.map(it=>{
+      const p = state.products.find(x=>x.id===it.productId);
+      return { rowId:uid(), name: it.name, qty:'', buyPrice: it.price, barcode: (p&&p.barcode)||'' };
+    });
+    flash(lastPurchase.items.length+' бараа өмнөх худалдан авалтаас бөглөгдлөө - Тоог шинэчлээд "Шалгаж харах" дарна уу', 'accent');
+    render();
+  };
   const newSupplierBtn = document.getElementById('newSupplierBtn');
   if(newSupplierBtn) newSupplierBtn.onclick = ()=>{
     state.modal = { type:'supplier', data:{ id:null, name:'', phone:'', debt:0 }, returnTo:'purchaseEntry' };
@@ -3305,6 +3480,16 @@ function attachHandlers(){
   if(exportExpensesCsvBtn) exportExpensesCsvBtn.onclick = exportExpensesCSV;
   document.querySelectorAll('[data-receipt]').forEach(el=>{ el.onclick = ()=>{ state.modal = {type:'receipt', data:{saleId:el.dataset.receipt}}; render(); }; });
   document.querySelectorAll('[data-delsale]').forEach(el=>{ el.onclick = ()=> deleteSale(el.dataset.delsale); });
+  // Ебаримтын QR-г бодит зураг болгож зурна - зөвхөн ТҮР санах ойд байгаа бол (шинэ баримт),
+  // учир QR-ийн түүхий өгөгдлийг сан руу хадгалдаггүй (аюулгүй байдлын шаардлага)
+  if(state.modal && state.modal.type==='receipt'){
+    const qrHolder = document.getElementById('ebarimtQrHolder');
+    const qrData = ebarimtQrCache[state.modal.data.saleId];
+    if(qrHolder && qrData && typeof QRCode !== 'undefined'){
+      qrHolder.innerHTML = '';
+      try{ new QRCode(qrHolder, { text: qrData, width: 140, height: 140 }); }catch(e){ /* QR сан ачаалагдаагүй бол алгасна */ }
+    }
+  }
   const printReceiptBtn = document.getElementById('printReceiptBtn');
   if(printReceiptBtn) printReceiptBtn.onclick = ()=>{
     const area = document.getElementById('receiptPrintArea');
