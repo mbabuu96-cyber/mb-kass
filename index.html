@@ -1493,13 +1493,17 @@ function startCameraScanner(){
         fps: 30,
         disableFlip: true, // Хойд камер л ашигладаг тул толин тусгал шалгах шаардлагагүй - боловсруулалт хөнгөрнэ
         qrbox: function(viewfinderWidth, viewfinderHeight){
-          // Native уншигчтай (таблет/Андройд Chrome) бол боловсруулалт хурдан тул хүрээг
-          // томруулж, хэрэглэгч нарийн зорьж тохируулах шаардлагагүй болгож хурдасгана.
-          // JS fallback (iOS) дээр frame боловсруулалт удаан тул дунд хэмжээндээ үлдээнэ.
-          const wRatio = cameraUsesNativeDetector ? 0.92 : 0.85;
-          const hCap = cameraUsesNativeDetector ? 0.6 : 0.45;
+          // ЧИГЛЭЛИЙН ЗАСВАР: баркодыг ХЭВТЭЭ эсвэл ХӨНДЛӨН (эргүүлж) ямар ч чиглэлээр
+          // барьсан ч дор хаяж нэг удаа хүрээн дотор БҲРЭН багтаасан бол native (ML Kit)
+          // уншигч ЧИГЛЭЛИЙГ ҮЛ ХАРГАЛЗАН шууд таньдаг. Өмнө нь хүрээ нарийн ХЭВТЭЭ тэгш
+          // өнцөгт байсан тул хөндлөн (босоо өндөр) баркод хүрээнээс гарч, танигдахгүй/удааширдаг
+          // байсан. Одоо хүрээг ДӨРВӨЛЖИН дөхүү (өндөр~өргөнтэйгөө ойролцоо) болгосноор ямар
+          // ч чиглэлээр барьсан ч багтаж, шууд танигдах магадлал нэмэгдэнэ.
+          const wRatio = cameraUsesNativeDetector ? 0.9 : 0.85;
+          const hCap = cameraUsesNativeDetector ? 0.8 : 0.65;
           const w = Math.floor(viewfinderWidth * wRatio);
-          const h = Math.floor(Math.min(viewfinderHeight * hCap, w * 0.65));
+          const squareH = Math.floor(w * (cameraUsesNativeDetector ? 0.95 : 0.85));
+          const h = Math.floor(Math.min(viewfinderHeight * hCap, squareH));
           return { width: w, height: h };
         },
         // ХУРДНЫ ГОЛ ЗАСВАР: Chrome/Android дээр browser-ийн ӨӨРИЙН НЬ хурдан (native)
