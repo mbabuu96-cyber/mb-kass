@@ -1522,13 +1522,22 @@ function startCameraScanner(){
         },
         // Зөвхөн дэлгүүрт бодитоор хэрэглэгддэг форматуудыг таньж, бусад формат хооронд
         // андуурч буруу уншихаас сэргийлнэ.
+        // "Зарим баркод огт уншдаггүй" гэмтлийн нэг шалтгаан нь - заримдаа нийлүүлэгчийн
+        // карго/дотоод шошго дээр ITF, CODABAR, CODE_93, UPC-ийн нэмэлт (EAN extension)
+        // зэрэг форматаар хэвлэгдсэн байдаг, өмнөх жагсаалтад эдгээр ороогүй тул танигддаггүй
+        // байсан. Нэмж оруулав - native (ML Kit) уншигчид нэмэлт формат шалгах зардал бараг
+        // байхгүй тул хурдад муугаар нөлөөлөхгүй.
         formatsToSupport: (typeof Html5QrcodeSupportedFormats !== 'undefined') ? [
           Html5QrcodeSupportedFormats.EAN_13,
           Html5QrcodeSupportedFormats.EAN_8,
           Html5QrcodeSupportedFormats.UPC_A,
           Html5QrcodeSupportedFormats.UPC_E,
+          Html5QrcodeSupportedFormats.UPC_EAN_EXTENSION,
           Html5QrcodeSupportedFormats.CODE_128,
           Html5QrcodeSupportedFormats.CODE_39,
+          Html5QrcodeSupportedFormats.CODE_93,
+          Html5QrcodeSupportedFormats.CODABAR,
+          Html5QrcodeSupportedFormats.ITF,
           Html5QrcodeSupportedFormats.QR_CODE
         ] : undefined
       },
@@ -1608,6 +1617,13 @@ function startCameraScanner(){
         // Гэрэл/zoom товчнуудын харагдацыг шинэчлэхийн тулд камерын удирдлагын хэсгийг дахин зурна
         const ctrl = document.getElementById('cameraControls');
         if(ctrl){ ctrl.innerHTML = cameraControlsHtml(); attachCameraControlHandlers(); }
+        // ХАРАНХУЙД АВТОМАТААР ГЭРЭЛ АСААХ: камер тогтворжоод (нэг секундийн дараа) кадрын
+        // гэрлийн түвшинг шалгаад, маш бараан бол гэрлийг (torch) автоматаар асаана - лангуу
+        // дотор, шүүгээний ар гэх мэт харанхуй газарт унших хурд/чанарыг нэмэгдүүлнэ. Зөвхөн
+        // нэг удаа шалгана, хэрэглэгч гараар унтраасан ч дахин асаахгүй.
+        if(cameraTorchSupported){
+          setTimeout(checkLowLightAndAutoTorch, 900);
+        }
       }catch(e){ /* тухайн төхөөрөмж дэмжихгүй бол хэвийн үргэлжилнэ */ }
     }).catch(function(err){
       cameraRunning = false;
@@ -1628,6 +1644,37 @@ function startCameraScanner(){
     flash('Камер эхлүүлэхэд алдаа гарлаа', 'warm');
     state.modal = null; render();
   }
+}
+// Видео фрэймийн голын жижиг хэсгээс дундаж гэрлийн түвшинг (luma) хэмжээд, маш бараан бол
+// гэрлийг автоматаар асаана. Canvas-аас дата уншихад зарим хуучин/дэмжихгүй орчинд алдаа
+// гарч болзошгүй тул try/catch-аар бүрэн хамгаалсан - алдаа гарвал зүгээр л алгаслана.
+function checkLowLightAndAutoTorch(){
+  try{
+    if(!cameraTorchSupported || cameraTorchOn || !html5QrcodeInstance || !cameraRunning) return;
+    const videoEl = document.querySelector('#cameraReader video');
+    if(!videoEl || !videoEl.videoWidth) return;
+    const size = 40;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(videoEl,
+      Math.max(0,(videoEl.videoWidth-size)/2), Math.max(0,(videoEl.videoHeight-size)/2), size, size,
+      0, 0, size, size);
+    const data = ctx.getImageData(0, 0, size, size).data;
+    let total = 0, count = 0;
+    for(let i=0; i<data.length; i+=4){
+      total += 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+      count++;
+    }
+    const avgLuma = count ? total/count : 255;
+    if(avgLuma < 55){ // ~255-гаас 55-аас доош бол маш бараан гэж үзнэ
+      cameraTorchOn = true;
+      html5QrcodeInstance.applyVideoConstraints({ advanced: [{ torch: true }] }).then(function(){
+        const ctrl = document.getElementById('cameraControls');
+        if(ctrl){ ctrl.innerHTML = cameraControlsHtml(); attachCameraControlHandlers(); }
+      }).catch(function(){ cameraTorchOn = false; });
+    }
+  }catch(e){ /* canvas дэмжигдэхгүй орчинд чимээгүй алгасна - гэрэл гараар асаана */ }
 }
 function stopCameraScanner(){
   clearTimeout(cameraStartWatchdog);
