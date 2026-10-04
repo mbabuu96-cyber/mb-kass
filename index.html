@@ -1438,7 +1438,7 @@ let cameraStartWatchdog = null; // камер хэт удаан (гацсан) �
 function openCameraModal(target){
   cameraScanTarget = target;
   scanConfirm = { lastCode:null, count:0 };
-  cameraTorchOn = false; cameraTorchSupported = false; cameraZoomCaps = null; cameraZoomLevel = 2;
+  cameraTorchOn = false; cameraTorchSupported = false; cameraZoomCaps = null; cameraZoomLevel = 1;
   state.modal = { type:'camera', data:{} };
   render();
 }
@@ -1566,18 +1566,17 @@ function startCameraScanner(){
     ).then(function(){
       cameraRunning = true; // энд ирснээр камер бодитоор эхэлсэн гэдгийг баталгаажуулна
       clearTimeout(cameraStartWatchdog); // амжилттай эхэлсэн тул гацсан-watchdog шаардлагагүй болсон
-      // Хол зайнаас уншихад туслах: төхөөрөмж дэмждэг бол 2x ойртуулалт (zoom) болон
-      // тасралтгүй фокус (continuous focus)-ыг автоматаар идэвхжүүлнэ.
+      // АНХААРУУЛГА: өмнө нь эхлэхдээ автоматаар 2x+ зумтай эхэлдэг байсан ("хол зайнаас
+      // унших"-д тус болгоно гэж), гэвч бодит хэрэглээнд баркодыг камерт ОЙРТУУЛЖ (ойрхноос)
+      // уншуулдаг тул автомат зум дэндүү ойртуулж, фокус олдохгүй/баркод хүрээнээс гарч
+      // УДААШИРДАГ, заримдаа огт унших боломжгүй болдог байсан. Тиймээс эхлэхдээ ЗУМГҮЙ
+      // (1x) эхэлж, хэрэгтэй бол хэрэглэгч өөрөө +Zoom товчоор хол зайнаас унших үед нэмнэ.
       try{
         const caps = html5QrcodeInstance.getRunningTrackCapabilities ? html5QrcodeInstance.getRunningTrackCapabilities() : null;
         const adv = [];
         if(caps && caps.zoom && caps.zoom.max){
           cameraZoomCaps = caps.zoom;
-          // ХУРДНЫ ЗАСВАР: өмнө нь тогтмол 2x ашигладаг байсан. Одоо төхөөрөмжийн бодит
-          // дэмждэг хамгийн их зумын 30%-ийг л/эсвэл 2x-ийн аль ИХ утгыг сонгож, илүү
-          // ойртуулж эхэлдэг болгосон - таблет дээр хол зайнаас баркод унших хурдассан.
-          const smartZoom = Math.max(2, Math.round(caps.zoom.max * 0.3 * 10)/10);
-          adv.push({ zoom: Math.min(caps.zoom.max, Math.max(caps.zoom.min||1, smartZoom)) });
+          cameraZoomLevel = caps.zoom.min || 1; // 1x-ээс эхэлнэ - автомат ойртуулга байхгүй
         } else { cameraZoomCaps = null; }
         if(caps && caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('continuous')>-1){
           adv.push({ focusMode: 'continuous' });
