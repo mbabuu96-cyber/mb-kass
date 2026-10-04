@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mb-kass-v56';
+const CACHE_NAME = 'mb-kass-v57';
 const FILES_TO_CACHE = [
   './index.html',
   './manifest.json',

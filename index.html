@@ -135,6 +135,7 @@
 <body>
 <div class="app" id="app"></div>
 <div id="flashToastContainer"></div>
+<div id="modalOverlayContainer"></div>
 
 <script>
 window.addEventListener('error', function(e){
@@ -1435,12 +1436,21 @@ const SCAN_CONFIRM_NEEDED = 2; // хэдэн удаа дараалан ижил 
 let cameraUsesNativeDetector = false; // энэ сесс дэх камер native BarcodeDetector ашиглаж байгаа эсэх
 let scanConfirmNeeded = SCAN_CONFIRM_NEEDED; // native уншигчтай бол 1, JS fallback бол 2
 let cameraStartWatchdog = null; // камер хэт удаан (гацсан) эхлэхээс сэргийлэх timeout-ийн ID
+// ХУРДНЫ ЗАСВАР: модал нээхдээ бүхэл #app-ийг (одоогийн таб дээрх бараа/борлуулалтын ИХ
+// жагсаалтыг) ДАХИН ЗУРАХГҚЙ, зөвхөн modalOverlayContainer-ийг л шинэчилнэ - ингэснээр
+// "Камер" товч дарахад цонх гарч ирэх хугацаа мэдэгдэхүйц хурдасна (их барааны жагсаалттай
+// дэлгүүрт энэ дахин зурах зардал хамгийн их байдаг байсан).
+function openModalLight(){
+  const mc = document.getElementById('modalOverlayContainer');
+  if(mc){ mc.innerHTML = state.modal ? modalView() : ''; }
+  attachHandlers();
+}
 function openCameraModal(target){
   cameraScanTarget = target;
   scanConfirm = { lastCode:null, count:0 };
   cameraTorchOn = false; cameraTorchSupported = false; cameraZoomCaps = null; cameraZoomLevel = 1.5;
   state.modal = { type:'camera', data:{} };
-  render();
+  openModalLight();
 }
 function startCameraScanner(){
   if(typeof Html5Qrcode === 'undefined'){ flash('Камерын сан ачаалагдсангүй. Интернэт холболтоо шалгаад дахин оролдоно уу', 'warm'); return; }
@@ -2016,8 +2026,13 @@ function render(){
     (state.tab==='horogdol' ? horogdolView() : '') +
     (state.tab==='zarlaga' ? zarlagaView() : '') +
     (state.tab==='bank' ? bankView() : '') +
-    (state.tab==='tailan' ? tailanView() : '') +
-    (state.modal ? modalView() : '');
+    (state.tab==='tailan' ? tailanView() : '');
+  // МОДАЛ нь #app-ийн дотор биш, ТУСДАА контейнерт зурагддаг (flashToastContainer-той ижил
+  // зарчим). Ингэснээр модал (жишээ нь камер) НЭЭХ үед ЗӨВХӨН модалын HTML-ийг л дахин
+  // зурж, бараа/борлуулалтын ХҚРГАН жагсаалт бүхий #app-ийг ДАХИН ЗУРАХГҪЙ - том жагсаалттай
+  // дэлгүүрт камер/бусад модал НЭЭХ үйлдлийг мэдэгдэхүйц хурдасгасан (openModalLight харах).
+  const modalContainer = document.getElementById('modalOverlayContainer');
+  if(modalContainer){ modalContainer.innerHTML = state.modal ? modalView() : ''; }
   attachHandlers();
   updateFlashToast(); // render() дуудагдах бүрд toast-ыг тухайн үеийн state-тэй нийцүүлнэ
   if(state.modal && (state.modal.type==='purchaseEntry' || state.modal.type==='bulkReview')){ saveDraftPurchase(); }
