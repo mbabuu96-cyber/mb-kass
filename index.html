@@ -1438,7 +1438,7 @@ let cameraStartWatchdog = null; // камер хэт удаан (гацсан) �
 function openCameraModal(target){
   cameraScanTarget = target;
   scanConfirm = { lastCode:null, count:0 };
-  cameraTorchOn = false; cameraTorchSupported = false; cameraZoomCaps = null; cameraZoomLevel = 1;
+  cameraTorchOn = false; cameraTorchSupported = false; cameraZoomCaps = null; cameraZoomLevel = 1.5;
   state.modal = { type:'camera', data:{} };
   render();
 }
@@ -1567,16 +1567,16 @@ function startCameraScanner(){
       cameraRunning = true; // энд ирснээр камер бодитоор эхэлсэн гэдгийг баталгаажуулна
       clearTimeout(cameraStartWatchdog); // амжилттай эхэлсэн тул гацсан-watchdog шаардлагагүй болсон
       // АНХААРУУЛГА: өмнө нь эхлэхдээ автоматаар 2x+ зумтай эхэлдэг байсан ("хол зайнаас
-      // унших"-д тус болгоно гэж), гэвч бодит хэрэглээнд баркодыг камерт ОЙРТУУЛЖ (ойрхноос)
-      // уншуулдаг тул автомат зум дэндүү ойртуулж, фокус олдохгүй/баркод хүрээнээс гарч
-      // УДААШИРДАГ, заримдаа огт унших боломжгүй болдог байсан. Тиймээс эхлэхдээ ЗУМГҮЙ
-      // (1x) эхэлж, хэрэгтэй бол хэрэглэгч өөрөө +Zoom товчоор хол зайнаас унших үед нэмнэ.
+      // унших"-д тус болгоно гэж), гэвч дэндүү их зум фокус олдохгүй/баркод хүрээнээс гарч
+      // УДААШИРДАГ байсан. Тохиромжтой дундаж хэмжээ болгож 1.5x-ээр эхэлнэ - ойрхноос ч,
+      // бага зэрэг холоос ч тохирно. Хэрэгтэй бол хэрэглэгч +/-Zoom товчоор өөрчилнө.
       try{
         const caps = html5QrcodeInstance.getRunningTrackCapabilities ? html5QrcodeInstance.getRunningTrackCapabilities() : null;
         const adv = [];
         if(caps && caps.zoom && caps.zoom.max){
           cameraZoomCaps = caps.zoom;
-          cameraZoomLevel = caps.zoom.min || 1; // 1x-ээс эхэлнэ - автомат ойртуулга байхгүй
+          cameraZoomLevel = Math.min(caps.zoom.max, Math.max(caps.zoom.min||1, 1.5));
+          adv.push({ zoom: cameraZoomLevel });
         } else { cameraZoomCaps = null; }
         if(caps && caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('continuous')>-1){
           adv.push({ focusMode: 'continuous' });
