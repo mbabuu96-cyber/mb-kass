@@ -1434,6 +1434,7 @@ let scanConfirm = { lastCode:null, count:0 };
 const SCAN_CONFIRM_NEEDED = 2; // хэдэн удаа дараалан ижил унших шаардлагатай (JS fallback-д)
 let cameraUsesNativeDetector = false; // энэ сесс дэх камер native BarcodeDetector ашиглаж байгаа эсэх
 let scanConfirmNeeded = SCAN_CONFIRM_NEEDED; // native уншигчтай бол 1, JS fallback бол 2
+let cameraStartWatchdog = null; // камер хэт удаан (гацсан) эхлэхээс сэргийлэх timeout-ийн ID
 function openCameraModal(target){
   cameraScanTarget = target;
   scanConfirm = { lastCode:null, count:0 };
@@ -1443,6 +1444,23 @@ function openCameraModal(target){
 }
 function startCameraScanner(){
   if(typeof Html5Qrcode === 'undefined'){ flash('Камерын сан ачаалагдсангүй. Интернэт холболтоо шалгаад дахин оролдоно уу', 'warm'); return; }
+  // Камер зөвшөөрөл асуух/нээгдэхэд хэдхэн секунд зарцуулдаг тул хэрэглэгч "гацсан" гэж
+  // бодохгүйн тулд ачаалж буй мессеж харуулна - html5-qrcode амжилттай эхэлмэгц үүнийг
+  // <video> элементээр дарж бичих тул дараа нь гараар арилгах шаардлагагүй.
+  const readerEl = document.getElementById('cameraReader');
+  if(readerEl){ readerEl.innerHTML = '<div style="padding:30px 10px;text-align:center;color:var(--ink-soft);font-size:13px;">Камер нээгдэж байна... Зөвшөөрлийн асуулт гарвал "Зөвшөөрөх" дарна уу.</div>'; }
+  // ГАЦААС СЭРГИЙЛЭХ: камер хэт удаан (8 секундээс дээш) хариу өгөхгүй бол гацсан гэж үзэж,
+  // алдаа харуулж, дахин оролдох боломж олгоно - өмнө нь ямар ч хариу өгөхгүйгээр хязгаарлагдмал
+  // хугацаагүй "гацдаг" байсан гэмтлийг эндээс засав.
+  clearTimeout(cameraStartWatchdog);
+  cameraStartWatchdog = setTimeout(function(){
+    if(!cameraRunning && state.modal && state.modal.type==='camera'){
+      try{ if(html5QrcodeInstance){ html5QrcodeInstance.stop().catch(function(){}); } }catch(e){}
+      html5QrcodeInstance = null;
+      flash('Камер нээгдэхэд хэт удлаа - дахин оролдоно уу эсвэл төхөөрөмжийн камерын зөвшөөрлийг шалгаарай', 'warm');
+      state.modal = null; render();
+    }
+  }, 8000);
   try{
     html5QrcodeInstance = new Html5Qrcode('cameraReader', {
       // Андройд Chrome дээрх төхөөрөмжийн УУГУУЛ (native) баркод таних хөдөлгүүрийг ашиглана -
@@ -1479,15 +1497,11 @@ function startCameraScanner(){
         // өмнөх JS-суурьтай тайлагчаас хэд дахин хурдан). iOS/Safari дэмждэггүй тул
         // тэнд автоматаар өмнөх JS decoder руу шилждэг - апп эвдрэхгүй.
         experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-        // Native detector-той таблет/Андройд дээр илүү өндөр нягтралтай фрэйм авч (1920x1080)
-        // хол зайнаас/жижгээр ч ЗӨВ унших чадварыг нэмэгдүүлнэ - native detector нь хурдан тул
-        // энэ нягтрал хурдад саад болохгүй. iOS дээр native байхгүй тул JS боловсруулалт
-        // удаан болохоос сэргийлж 1280x720-д хэвээр үлдээнэ.
-        videoConstraints: cameraUsesNativeDetector ? {
-          facingMode: 'environment',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        } : {
+        // АНХААРУУЛГА: өмнө нь native detector-той төхөөрөмж дээр 1920x1080 хүсдэг байсан
+        // ч, зарим Android таблет дээр камер өндөр нягтрал руу шилжихдээ ГАЦДАГ (getUserMedia
+        // маш удаан эсвэл хариу өгдөггүй) гэсэн тул 1280x720-д буцаав - камер УДИРДЛАГАГҮЙ
+        // "гацах"-аас сэргийлэх нь хурдан нягтралаас илүү чухал.
+        videoConstraints: {
           facingMode: 'environment',
           width: { ideal: 1280 },
           height: { ideal: 720 }
@@ -1551,6 +1565,7 @@ function startCameraScanner(){
       function(){ /* frame бүр амжилтгүй унших - хэвийн, дахин оролдоно */ }
     ).then(function(){
       cameraRunning = true; // энд ирснээр камер бодитоор эхэлсэн гэдгийг баталгаажуулна
+      clearTimeout(cameraStartWatchdog); // амжилттай эхэлсэн тул гацсан-watchdog шаардлагагүй болсон
       // Хол зайнаас уншихад туслах: төхөөрөмж дэмждэг бол 2x ойртуулалт (zoom) болон
       // тасралтгүй фокус (continuous focus)-ыг автоматаар идэвхжүүлнэ.
       try{
@@ -1583,6 +1598,7 @@ function startCameraScanner(){
       }catch(e){ /* тухайн төхөөрөмж дэмжихгүй бол хэвийн үргэлжилнэ */ }
     }).catch(function(err){
       cameraRunning = false;
+      clearTimeout(cameraStartWatchdog); // алдаа гарсан тул watchdog шаардлагагүй
       const msg = (err && err.message) ? err.message : String(err);
       if(msg.indexOf('NotAllowedError')>-1 || msg.indexOf('Permission')>-1){
         flash('Камерт хандах зөвшөөрөл олгогдоогүй. Браузерын тохиргооноос зөвшөөрнө уу', 'warm');
@@ -1595,11 +1611,13 @@ function startCameraScanner(){
     });
   }catch(e){
     cameraRunning = false;
+    clearTimeout(cameraStartWatchdog);
     flash('Камер эхлүүлэхэд алдаа гарлаа', 'warm');
     state.modal = null; render();
   }
 }
 function stopCameraScanner(){
+  clearTimeout(cameraStartWatchdog);
   scanConfirm = { lastCode:null, count:0 };
   if(html5QrcodeInstance && cameraRunning){
     cameraRunning = false;
