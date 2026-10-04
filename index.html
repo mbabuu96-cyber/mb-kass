@@ -1431,7 +1431,9 @@ function scanBarcodeIntoField(formId, fieldName){
 // Буруу уншилтаас сэргийлэх баталгаажуулалтын төлөв: сүүлд уншсан код болон хэдэн удаа дараалан
 // ижил гарсныг хадгална. N удаа дараалан яг ижил код гарсны дараа л зөвшөөрнө.
 let scanConfirm = { lastCode:null, count:0 };
-const SCAN_CONFIRM_NEEDED = 2; // хэдэн удаа дараалан ижил унших шаардлагатай
+const SCAN_CONFIRM_NEEDED = 2; // хэдэн удаа дараалан ижил унших шаардлагатай (JS fallback-д)
+let cameraUsesNativeDetector = false; // энэ сесс дэх камер native BarcodeDetector ашиглаж байгаа эсэх
+let scanConfirmNeeded = SCAN_CONFIRM_NEEDED; // native уншигчтай бол 1, JS fallback бол 2
 function openCameraModal(target){
   cameraScanTarget = target;
   scanConfirm = { lastCode:null, count:0 };
@@ -1450,17 +1452,26 @@ function startCameraScanner(){
     });
     cameraRunning = false;
     scanConfirm = { lastCode:null, count:0 };
+    // Браузер УУГУУЛ (native) BarcodeDetector API дэмжиж байгаа эсэхийг (ихэвчлэн
+    // Андройд Chrome/таблет) урьдчилан мэднэ. Native үед ХУРДАН бөгөөд ХОЛ зайнаас ч
+    // алдаагүй таньдаг тул: (а) илүү өндөр нягтралтай фрэйм ашиглаж болно (баркодыг хол
+    // зайнаас, жижгээр ч танина), (б) баталгаажуулалтад ЗӨВХӨН 1 удаа тохирсон уншилт
+    // шаардана (JS fallback дээр гэнэтийн андуурал арай илүү тул 2 удаа үргэлжлүүлнэ).
+    cameraUsesNativeDetector = (typeof BarcodeDetector !== 'undefined');
+    scanConfirmNeeded = cameraUsesNativeDetector ? 1 : SCAN_CONFIRM_NEEDED;
     html5QrcodeInstance.start(
       { facingMode: 'environment' },
       {
         fps: 30,
         disableFlip: true, // Хойд камер л ашигладаг тул толин тусгал шалгах шаардлагагүй - боловсруулалт хөнгөрнэ
         qrbox: function(viewfinderWidth, viewfinderHeight){
-          // Уншuulах хүрээг дэлгэцийн хэмжээнд тааруулна. Хурдны үүднээс дунд зэргийн
-          // хэмжээтэй байлгав - хэт том бол JS-ээр (iOS дээр native танигч байдаггүй тул)
-          // frame бүрийг боловсруулахад удаан болдог.
-          const w = Math.floor(viewfinderWidth * 0.85);
-          const h = Math.floor(Math.min(viewfinderHeight * 0.45, w * 0.65));
+          // Native уншигчтай (таблет/Андройд Chrome) бол боловсруулалт хурдан тул хүрээг
+          // томруулж, хэрэглэгч нарийн зорьж тохируулах шаардлагагүй болгож хурдасгана.
+          // JS fallback (iOS) дээр frame боловсруулалт удаан тул дунд хэмжээндээ үлдээнэ.
+          const wRatio = cameraUsesNativeDetector ? 0.92 : 0.85;
+          const hCap = cameraUsesNativeDetector ? 0.6 : 0.45;
+          const w = Math.floor(viewfinderWidth * wRatio);
+          const h = Math.floor(Math.min(viewfinderHeight * hCap, w * 0.65));
           return { width: w, height: h };
         },
         // ХУРДНЫ ГОЛ ЗАСВАР: Chrome/Android дээр browser-ийн ӨӨРИЙН НЬ хурдан (native)
@@ -1468,9 +1479,15 @@ function startCameraScanner(){
         // өмнөх JS-суурьтай тайлагчаас хэд дахин хурдан). iOS/Safari дэмждэггүй тул
         // тэнд автоматаар өмнөх JS decoder руу шилждэг - апп эвдрэхгүй.
         experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-        // iOS дээр native танигч байхгүй тул JS-ээр боловсруулах хэмжээг арай багасгаж
-        // (1920x1080 -> 1280x720) frame бүрийн боловсруулах хугацааг хурдасгав.
-        videoConstraints: {
+        // Native detector-той таблет/Андройд дээр илүү өндөр нягтралтай фрэйм авч (1920x1080)
+        // хол зайнаас/жижгээр ч ЗӨВ унших чадварыг нэмэгдүүлнэ - native detector нь хурдан тул
+        // энэ нягтрал хурдад саад болохгүй. iOS дээр native байхгүй тул JS боловсруулалт
+        // удаан болохоос сэргийлж 1280x720-д хэвээр үлдээнэ.
+        videoConstraints: cameraUsesNativeDetector ? {
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        } : {
           facingMode: 'environment',
           width: { ideal: 1280 },
           height: { ideal: 720 }
@@ -1502,7 +1519,7 @@ function startCameraScanner(){
         } else {
           scanConfirm = { lastCode: code, count: 1 };
         }
-        if(scanConfirm.count < SCAN_CONFIRM_NEEDED) return;
+        if(scanConfirm.count < scanConfirmNeeded) return;
         scanConfirm = { lastCode:null, count:0 };
         stopCameraScanner();
         if(cameraScanTarget==='fillField'){
@@ -1549,6 +1566,12 @@ function startCameraScanner(){
         } else { cameraZoomCaps = null; }
         if(caps && caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('continuous')>-1){
           adv.push({ focusMode: 'continuous' });
+        }
+        // Гэрэлтүүлэг тогтворгүй орчинд (лангуу, нүцгэн гэрэл) ч тод фрэйм авахын тулд
+        // тасралтгүй гэрэлтүүлгийн нөхцөл (exposure) дасан зохицуулалтыг идэвхжүүлнэ - ялангуяа
+        // таблет дээр гар чичирхийлэл/зай өөрчлөгдөхөд дахин тодруулахыг хурдасгана.
+        if(caps && caps.exposureMode && Array.isArray(caps.exposureMode) && caps.exposureMode.indexOf('continuous')>-1){
+          adv.push({ exposureMode: 'continuous' });
         }
         cameraTorchSupported = !!(caps && ('torch' in caps));
         if(adv.length && html5QrcodeInstance.applyVideoConstraints){
